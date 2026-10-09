@@ -14,6 +14,7 @@ import { DENY_REASONS, MERCHANT_ID, MERCHANT_NAME } from "../src/types.js";
 
 const SAMPLE_NOW = "2026-10-09T10:00:00+08:00";
 const RESOURCE_ID = "/agent/purchase";
+const ADMIN_TOKEN = "test-admin-token";
 
 const DEFAULT_AUTH = {
   budget: {
@@ -41,6 +42,7 @@ class ScriptedAlipay implements AlipayExecutor {
   amount = "";
   resourceId = RESOURCE_ID;
   active: unknown = true;
+  omit: Array<"amount" | "trade_no" | "resource_id"> = [];
   confirmCodes = ["10000"];
   verifyCalls = 0;
   confirmCalls = 0;
@@ -50,7 +52,7 @@ class ScriptedAlipay implements AlipayExecutor {
       this.verifyCalls += 1;
       assert.equal(params.bizContent.trade_no, this.tradeNo);
       assert.equal(typeof params.bizContent.payment_proof, "string");
-      return {
+      const payload: Record<string, unknown> = {
         code: "10000",
         trade_no: this.tradeNo,
         out_trade_no: this.outTradeNo,
@@ -58,6 +60,8 @@ class ScriptedAlipay implements AlipayExecutor {
         resource_id: this.resourceId,
         active: this.active,
       };
+      for (const field of this.omit) delete payload[field];
+      return payload;
     }
     if (method === "alipay.aipay.agent.fulfillment.confirm") {
       const code = this.confirmCodes[Math.min(this.confirmCalls, this.confirmCodes.length - 1)] ?? "10000";
@@ -85,7 +89,7 @@ function testConfig(): { config: A2MConfig; publicKey: KeyObject } {
   };
 }
 
-async function start(alipay: AlipayExecutor = new ScriptedAlipay()): Promise<{
+async function start(alipay: AlipayExecutor = new ScriptedAlipay(), adminToken = ADMIN_TOKEN): Promise<{
   base: string;
   app: App;
   keys: { config: A2MConfig; publicKey: KeyObject };
@@ -98,6 +102,7 @@ async function start(alipay: AlipayExecutor = new ScriptedAlipay()): Promise<{
     databasePath: path.join(directory, "agent-pay.sqlite"),
     config: keys.config,
     alipay,
+    adminToken,
   });
   await new Promise<void>((resolve) => {
     app.server.listen(0, "127.0.0.1", () => resolve());
@@ -124,11 +129,12 @@ function closeServer(server: Server, app: App): Promise<void> {
   });
 }
 
-async function api(base: string, urlPath: string, init?: RequestInit): Promise<ApiResult> {
+async function api(base: string, urlPath: string, init?: RequestInit, options?: { admin?: boolean }): Promise<ApiResult> {
   const response = await fetch(`${base}${urlPath}`, {
     ...init,
     headers: {
       ...(init?.body ? { "content-type": "application/json" } : {}),
+      ...(options?.admin === false ? {} : { authorization: `Bearer ${ADMIN_TOKEN}` }),
       ...(init?.headers ?? {}),
     },
   });
@@ -635,6 +641,100 @@ test("deny sku_not_allowed for a non-stationery catalog item and an unknown sku"
     const unknownToken = await issue(app.base);
     const unknown = await purchase(app.base, unknownToken.token, [{ sku_id: "sku-stapler", quantity: 1 }]);
     assert.equal(unknown.body.deny_reason, "sku_not_allowed");
+  } finally {
+    await app.close();
+  }
+});
+
+test("verify omits that lack amount, trade_no, or resource_id do not fulfill", async () => {
+  for (const field of ["amount", "trade_no", "resource_id"] as const) {
+    const alipay = new ScriptedAlipay();
+    const app = await start(alipay);
+    try {
+      await boot(app.base);
+      const token = await issue(app.base);
+      const bill = await purchase(app.base, token.token, [{ sku_id: "sku-pen", quantity: 1 }]);
+      assert.equal(bill.status, 402);
+      const decoded = decodeHeader(bill.paymentNeeded ?? "");
+      alipay.outTradeNo = decoded.protocol.out_trade_no;
+      alipay.amount = decoded.protocol.amount;
+      alipay.tradeNo = "2026100900000099";
+      alipay.omit = [field];
+      const paid = await api(app.base, "/agent/purchase", {
+        method: "POST",
+        headers: { "payment-proof": proofHeader(alipay.tradeNo), "content-type": "application/json" },
+        body: "{}",
+      });
+      assert.equal(paid.status, 402, field);
+      assert.equal(paid.body.ok, undefined, field);
+      assert.equal((await api(app.base, "/expense-drafts")).body.expense_drafts.length, 0, field);
+      assert.equal(alipay.confirmCalls, 0, field);
+      assert.equal(alipay.verifyCalls, 1, field);
+    } finally {
+      await app.close();
+    }
+  }
+});
+
+test("admin endpoints reject a missing bearer and accept ADMIN_TOKEN", async () => {
+  const app = await start();
+  try {
+    const deniedClock = await api(
+      app.base,
+      "/sandbox/clock",
+      { method: "POST", body: JSON.stringify({ now: SAMPLE_NOW }) },
+      { admin: false },
+    );
+    assert.equal(deniedClock.status, 401);
+    assert.equal(deniedClock.body.error, "unauthorized");
+    assert.equal((await api(app.base, "/sandbox/clock")).body.source, "system");
+
+    const deniedAuth = await api(
+      app.base,
+      "/authorization",
+      { method: "PUT", body: JSON.stringify(DEFAULT_AUTH) },
+      { admin: false },
+    );
+    assert.equal(deniedAuth.status, 401);
+    assert.equal((await api(app.base, "/authorization")).body.authorized, false);
+
+    await boot(app.base);
+    const deniedToken = await api(app.base, "/payment-tokens", { method: "POST" }, { admin: false });
+    assert.equal(deniedToken.status, 401);
+    assert.equal(deniedToken.body.token, undefined);
+
+    const wrong = await api(app.base, "/payment-tokens", {
+      method: "POST",
+      headers: { authorization: "Bearer wrong-token" },
+    });
+    assert.equal(wrong.status, 401);
+
+    const issued = await issue(app.base);
+    assert.equal(issued.ttl_seconds, 300);
+    assert.equal(issued.single_use, true);
+
+    const deniedReset = await api(app.base, "/sandbox/reset", { method: "POST" }, { admin: false });
+    assert.equal(deniedReset.status, 401);
+    assert.equal((await api(app.base, `/payment-tokens/${issued.token}`)).body.token, issued.token);
+
+    const reset = await api(app.base, "/sandbox/reset", { method: "POST" });
+    assert.equal(reset.status, 200);
+    assert.equal((await api(app.base, "/authorization")).body.authorized, false);
+  } finally {
+    await app.close();
+  }
+});
+
+test("an empty ADMIN_TOKEN rejects admin calls", async () => {
+  const app = await start(new ScriptedAlipay(), "");
+  try {
+    const saved = await api(app.base, "/authorization", {
+      method: "PUT",
+      body: JSON.stringify(DEFAULT_AUTH),
+    });
+    assert.equal(saved.status, 401);
+    assert.equal(saved.body.error, "unauthorized");
+    assert.equal((await api(app.base, "/authorization")).body.authorized, false);
   } finally {
     await app.close();
   }

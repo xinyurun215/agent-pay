@@ -18,11 +18,24 @@ function decodeBase64Url(value) {
   return new TextDecoder().decode(bytes);
 }
 
+const adminTokenEl = document.querySelector("#admin-token");
+const storedAdminToken = sessionStorage.getItem("agent-pay-admin-token");
+if (storedAdminToken) adminTokenEl.value = storedAdminToken;
+adminTokenEl.addEventListener("input", () => {
+  sessionStorage.setItem("agent-pay-admin-token", adminTokenEl.value.trim());
+});
+
+function adminHeaders() {
+  const token = adminTokenEl.value.trim();
+  return token ? { authorization: `Bearer ${token}` } : {};
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
     headers: {
       ...(options.body ? { "content-type": "application/json" } : {}),
+      ...adminHeaders(),
       ...(options.headers ?? {}),
     },
   });

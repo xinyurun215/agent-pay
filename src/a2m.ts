@@ -1,7 +1,6 @@
 import { createPrivateKey, createSign, randomUUID } from "node:crypto";
 
 import type { A2MConfig } from "./sandbox-config.js";
-import { SANDBOX_GATEWAY, SANDBOX_SERVICE_ID } from "./sandbox-config.js";
 
 /**
  * AI 按量付费 helpers copied from the official Node.js example in
@@ -72,10 +71,6 @@ export function centsToAmount(cents: number): string {
   const yuan = Math.floor(cents / 100);
   const fraction = cents % 100;
   return `${yuan}.${String(fraction).padStart(2, "0")}`;
-}
-
-export function isExactSandboxMode(config: A2MConfig): boolean {
-  return config.gateway === SANDBOX_GATEWAY && config.serviceId === SANDBOX_SERVICE_ID;
 }
 
 export function createOutTradeNo(now: Date): string {

@@ -67,17 +67,17 @@ Node.js 22+.
 
 ```bash
 npm install
-npm start
+ADMIN_TOKEN=choose-a-local-secret npm start
 ```
 
-Open http://127.0.0.1:3000. Orders live in `data/agent-pay.sqlite` (gitignored). `POST /sandbox/reset` clears authorization, tokens, and orders. It does not delete `.alipay-sandbox.json`.
+Open http://127.0.0.1:3000 and paste that same value into the Admin token field. The page sends it as `Authorization: Bearer` and keeps it in this tab's sessionStorage. `PUT /authorization`, `POST /payment-tokens`, `POST /sandbox/clock`, and `POST /sandbox/reset` return `401` `unauthorized` without that bearer. An empty `ADMIN_TOKEN` rejects every one of those calls. Orders live in `data/agent-pay.sqlite` (gitignored). `POST /sandbox/reset` clears authorization, tokens, and orders. It does not delete `.alipay-sandbox.json`.
 
 ```bash
 npm test
 npm run typecheck
 ```
 
-`npm test` does not call Alipay. It drives the same verify and confirm method names through a scripted `alipay-sdk` executor, and it checks the merchant RSA2 signature on `Payment-Needed`.
+`npm test` does not call Alipay. It drives the same verify and confirm method names through a scripted `alipay-sdk` executor, and it checks the merchant RSA2 signature on `Payment-Needed`. A verify response is accepted only when `alipay.aipay.agent.payment.verify` itself returns `active`, `amount`, `trade_no`, `out_trade_no`, and `resource_id`. Missing fields do not fall back to the local order, and no expense draft is written.
 
 ## Catalog
 
@@ -92,12 +92,15 @@ npm run typecheck
 
 ```bash
 BASE=http://127.0.0.1:3000
+AUTH="authorization: Bearer $ADMIN_TOKEN"
 
 curl -s -X POST $BASE/sandbox/clock \
+  -H "$AUTH" \
   -H 'content-type: application/json' \
   -d '{"now":"2026-10-09T10:00:00+08:00"}'
 
 curl -s -X PUT $BASE/authorization \
+  -H "$AUTH" \
   -H 'content-type: application/json' \
   -d '{
     "budget": {"per_order_cents": 50000, "daily_cents": 200000, "total_cents": 500000},
@@ -106,7 +109,7 @@ curl -s -X PUT $BASE/authorization \
     "merchant_whitelist": ["stationery-demo-001"]
   }'
 
-TOKEN=$(curl -s -X POST $BASE/payment-tokens | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>process.stdout.write(JSON.parse(s).token))")
+TOKEN=$(curl -s -X POST $BASE/payment-tokens -H "$AUTH" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>process.stdout.write(JSON.parse(s).token))")
 
 curl -sD - -X POST $BASE/agent/purchase \
   -H 'content-type: application/json' \
@@ -153,6 +156,7 @@ Move the clock to one second after the token `expires_at` and purchase. The same
 
 ```bash
 curl -s -X POST $BASE/sandbox/clock \
+  -H "$AUTH" \
   -H 'content-type: application/json' \
   -d '{"now":"2026-10-09T10:05:01+08:00"}'
 ```
@@ -180,16 +184,17 @@ Unknown `sku_id` values return the same code.
 | `GET` | `/health` | Rail name, whether sandbox config is loaded, `deny_reasons` |
 | `GET` | `/catalog` | Authoritative SKU prices |
 | `GET` | `/authorization` | Current authorization and defaults |
-| `PUT` | `/authorization` | Set budget, whitelist, and validity |
-| `POST` | `/payment-tokens` | Issue a token after authorization |
+| `PUT` | `/authorization` | Set budget, whitelist, and validity. Requires admin bearer |
+| `POST` | `/payment-tokens` | Issue a token after authorization. Requires admin bearer |
 | `GET` | `/payment-tokens/:token` | Token status, including `used` |
 | `POST` | `/agent/purchase` | 402 `Payment-Needed`, or verify `Payment-Proof` |
 | `GET` | `/orders/:orderId` | Fulfilled order |
 | `GET` | `/expense-drafts` | Receipt callbacks |
 | `GET` | `/expense-drafts/:id` | One draft |
 | `GET` | `/receipts/:orderId` | HTML receipt |
-| `GET` / `POST` | `/sandbox/clock` | Read or set the demo clock |
-| `POST` | `/sandbox/reset` | Clear authorization, tokens, and orders |
+| `GET` | `/sandbox/clock` | Read the demo clock |
+| `POST` | `/sandbox/clock` | Set the demo clock. Requires admin bearer |
+| `POST` | `/sandbox/reset` | Clear authorization, tokens, and orders. Requires admin bearer |
 
 Denied purchases respond with HTTP 403:
 

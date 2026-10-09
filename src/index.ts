@@ -13,6 +13,7 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
 const { server } = createApp({
   databasePath: path.resolve("data/agent-pay.sqlite"),
   config: loadSandboxConfig(path.resolve(".alipay-sandbox.json")),
+  adminToken: process.env.ADMIN_TOKEN ?? "",
 });
 server.listen(port, host, () => {
   console.log(`Agent Pay sandbox listening on http://${host}:${port}`);

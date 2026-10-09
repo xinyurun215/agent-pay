@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { access } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -87,12 +88,29 @@ export interface App {
   close(): void;
 }
 
+function bearerMatches(header: string | string[] | undefined, expected: string): boolean {
+  if (!expected) return false;
+  const raw = Array.isArray(header) ? header[0] : header;
+  if (!raw?.startsWith("Bearer ")) return false;
+  const presented = Buffer.from(raw.slice("Bearer ".length));
+  const required = Buffer.from(expected);
+  if (presented.length === 0 || presented.length !== required.length) return false;
+  return timingSafeEqual(presented, required);
+}
+
 export function createApp(options: {
   databasePath: string;
   config: A2MConfig | null;
   alipay?: AlipayExecutor | null;
+  adminToken: string;
 }): App {
   const purchase = createPurchaseApp(options);
+
+  function requireAdmin(req: IncomingMessage): void {
+    if (!bearerMatches(req.headers.authorization, options.adminToken)) {
+      throw new HttpError(401, "unauthorized", "Admin bearer token is required");
+    }
+  }
 
   const server = createServer((req, res) => {
     void handle(req, res).catch((error: unknown) => {
@@ -149,12 +167,16 @@ export function createApp(options: {
     }
 
     if (method === "PUT" && pathname === "/authorization") {
-      const authorization = purchase.setAuthorization(parseAuthorization(await readBody(req)));
+      const body = await readBody(req);
+      requireAdmin(req);
+      const authorization = purchase.setAuthorization(parseAuthorization(body));
       sendJson(res, 200, { ok: true, authorized: true, authorization });
       return;
     }
 
     if (method === "POST" && pathname === "/payment-tokens") {
+      await readBody(req);
+      requireAdmin(req);
       const token = purchase.issueToken();
       sendJson(res, 200, { ok: true, ...token });
       return;
@@ -249,7 +271,9 @@ export function createApp(options: {
     }
 
     if (method === "POST" && pathname === "/sandbox/clock") {
-      const clock = parseClock(await readBody(req));
+      const body = await readBody(req);
+      requireAdmin(req);
+      const clock = parseClock(body);
       if ("reset" in clock) purchase.clock.reset();
       else purchase.clock.set(clock.now);
       sendJson(res, 200, { ok: true, ...purchase.clock.view() });
@@ -257,6 +281,8 @@ export function createApp(options: {
     }
 
     if (method === "POST" && pathname === "/sandbox/reset") {
+      await readBody(req);
+      requireAdmin(req);
       purchase.reset();
       sendJson(res, 200, { ok: true, reset: true });
       return;

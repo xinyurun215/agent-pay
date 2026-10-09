@@ -7,7 +7,6 @@ import {
   decodePaymentProof,
   encodePaymentNeeded,
   formatISO8601WithTimezone,
-  isExactSandboxMode,
   isGatewaySuccess,
   readConfirmPayload,
   readVerifyPayload,
@@ -374,7 +373,7 @@ export function createPurchaseApp(options: {
       };
     },
     async verifyProof(header, baseUrl) {
-      const activeConfig = requireConfig();
+      requireConfig();
       if (!alipay) {
         throw new HttpError(503, "sandbox_not_configured", "Alipay SDK client is not configured");
       }
@@ -393,20 +392,21 @@ export function createPurchaseApp(options: {
         return { status: 402, body: { code: "Payment-Needed", message: "需要支付" } };
       }
 
-      const returnedTradeNo = textField(responseData, "trade_no", "tradeNo");
+      const verifyTradeNo = textField(responseData, "trade_no", "tradeNo");
       const verifyOutTradeNo = textField(responseData, "out_trade_no", "outTradeNo");
-      const returnedAmount = responseData.amount;
-      const returnedResourceId = textField(responseData, "resource_id", "resourceId");
+      const verifyAmount = textField(responseData, "amount");
+      const resourceIdVerified = textField(responseData, "resource_id", "resourceId");
       const active = responseData.active;
       const order = verifyOutTradeNo ? database.findOrder(verifyOutTradeNo) : null;
-      const sandboxMode = isExactSandboxMode(activeConfig);
-      const verifyTradeNo = returnedTradeNo || (sandboxMode ? decoded.tradeNo : "");
-      const verifyAmount = (typeof returnedAmount === "string" && returnedAmount.trim() !== ""
-        ? returnedAmount
-        : "") || (sandboxMode && order ? order.amount : "");
-      const resourceIdVerified = returnedResourceId || (sandboxMode && order ? order.resourceId : "");
 
-      if (active !== true || !verifyTradeNo || verifyTradeNo !== decoded.tradeNo || !verifyOutTradeNo || !resourceIdVerified) {
+      if (
+        active !== true ||
+        !verifyTradeNo ||
+        verifyTradeNo !== decoded.tradeNo ||
+        !verifyOutTradeNo ||
+        !verifyAmount ||
+        !resourceIdVerified
+      ) {
         return order ? billFromStored(order) : { status: 402, body: { code: "Payment-Needed", message: "需要支付" } };
       }
       const amountMatches = Boolean(order && amountsEqual(order.amount, verifyAmount));

@@ -23,8 +23,11 @@
   <main class="layout">
     <section class="card">
       <h2>1. 授权</h2>
-      <p class="hint">未保存授权时不能签发令牌。令牌策略固定为 TTL 300 秒、单次使用。</p>
+      <p class="hint">未保存授权时不能签发令牌。令牌策略固定为 TTL 300 秒、单次使用。保存授权、签发令牌、设定时钟和重置沙箱需要与环境变量 ADMIN_TOKEN 一致的 Bearer。</p>
       <form id="auth-form">
+        <label style="margin-bottom: 0.6rem">管理令牌 Admin token
+          <input id="admin-token" type="password" autocomplete="off" placeholder="与 ADMIN_TOKEN 相同" />
+        </label>
         <div class="grid">
           <label>单笔上限（分） per_order_cents
             <input id="per-order" name="per_order_cents" type="number" min="0" step="1" required />
