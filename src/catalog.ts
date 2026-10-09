@@ -13,6 +13,12 @@ export const CATALOG: readonly CatalogSku[] = [
     allowed_by_default_keywords: true,
   },
   {
+    sku_id: "sku-pen-cent",
+    name: "签字笔（1分试买）",
+    unit_price_cents: 1,
+    allowed_by_default_keywords: true,
+  },
+  {
     sku_id: "sku-paper",
     name: "A4纸 70g 500张",
     unit_price_cents: 2_500,

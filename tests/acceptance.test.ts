@@ -338,6 +338,26 @@ test("402 bill uses the server catalog price and a merchant RSA2 signature", asy
   }
 });
 
+test("sku-pen-cent bills exactly 1 cent", async () => {
+  const app = await start();
+  try {
+    await boot(app.base);
+    const catalog = await api(app.base, "/catalog");
+    const sample = catalog.body.skus.find((sku: { sku_id: string }) => sku.sku_id === "sku-pen-cent");
+    assert.equal(sample.unit_price_cents, 1);
+    assert.equal(sample.allowed_by_default_keywords, true);
+    assert.match(sample.name, /签字笔/);
+    const token = await issue(app.base);
+    const bill = await purchase(app.base, token.token, [{ sku_id: "sku-pen-cent", quantity: 1 }]);
+    assert.equal(bill.status, 402);
+    assert.equal(bill.body.amount, "0.01");
+    assert.equal(bill.body.amount_cents, 1);
+    assert.match(bill.body.goods_name, /签字笔（1分试买）x1/);
+  } finally {
+    await app.close();
+  }
+});
+
 test("verified sandbox payment writes the server amount into an expense draft", async () => {
   const alipay = new ScriptedAlipay();
   const app = await start(alipay);

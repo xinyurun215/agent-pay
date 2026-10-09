@@ -84,6 +84,7 @@ npm run typecheck
 | SKU | Name | Unit price |
 | --- | --- | --- |
 | `sku-pen` | 黑色签字笔 | 800 cents (`8.00` CNY) |
+| `sku-pen-cent` | 签字笔（1分试买） | 1 cent (`0.01` CNY) |
 | `sku-paper` | A4纸 70g 500张 | 2500 cents |
 | `sku-folder` | 资料文件夹 | 1200 cents |
 | `sku-mug` | 陶瓷马克杯 | 3900 cents (keyword miss) |
@@ -119,6 +120,8 @@ curl -sD - -X POST $BASE/agent/purchase \
 Before `PUT /authorization`, token issuance returns `403` `authorization_required`.
 
 The purchase response is HTTP 402. Body `amount` is `8.00` and `amount_cents` is `800`, not the client value `1`. The `Payment-Needed` header is the bill the sandbox cashier pays. A second purchase with the same token and no `Payment-Proof` returns `token_reused`.
+
+`sku-pen-cent` is the 1-fen demo. One unit bills `amount` `0.01` and `amount_cents` `1`. Its name contains `签字笔`, so the default keyword list allows it.
 
 After a `Payment-Proof` verifies, `GET /expense-drafts` contains `order_id`, `amount_cents`, `paid_at`, `merchant_name`, `receipt_url`, and `expense_draft_id`. Open `receipt_url` for the receipt. If `alipay.aipay.agent.fulfillment.confirm` fails, the draft is not listed; retry the same `Payment-Proof`.
 
