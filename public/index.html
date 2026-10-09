@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent Pay · 办公文具采购沙箱</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header>
+    <div>
+      <div class="stamp">SANDBOX</div>
+      <h1>Agent Pay 办公文具采购</h1>
+      <p class="lede">用户设定预算、商户白名单和有效期后，办公 Agent 才能取得 300 秒单次支付令牌，按服务端目录价向文具演示商户付款，并把收据写入报销草稿。</p>
+    </div>
+    <div class="clock">
+      <div>沙箱时间</div>
+      <strong id="clock-now">—</strong>
+      <div id="clock-source" class="hint"></div>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="card">
+      <h2>1. 授权</h2>
+      <p class="hint">未保存授权时不能签发令牌。令牌策略固定为 TTL 300 秒、单次使用。</p>
+      <form id="auth-form">
+        <div class="grid">
+          <label>单笔上限（分） per_order_cents
+            <input id="per-order" name="per_order_cents" type="number" min="0" step="1" required />
+          </label>
+          <label>单日上限（分） daily_cents
+            <input id="daily" name="daily_cents" type="number" min="0" step="1" required />
+          </label>
+          <label>总额上限（分） total_cents
+            <input id="total" name="total_cents" type="number" min="0" step="1" required />
+          </label>
+        </div>
+        <div class="grid two" style="margin-top: 0.6rem">
+          <label>生效 valid_from
+            <input id="valid-from" name="valid_from" required />
+          </label>
+          <label>失效 valid_to
+            <input id="valid-to" name="valid_to" required />
+          </label>
+        </div>
+        <div class="grid two" style="margin-top: 0.6rem">
+          <label>商户白名单
+            <input id="whitelist" name="merchant_whitelist" required />
+          </label>
+          <label>SKU 关键词（子串）
+            <input id="keywords" name="sku_keywords" required />
+          </label>
+        </div>
+        <div class="actions">
+          <button type="submit">保存授权</button>
+          <button type="button" class="secondary" id="use-sample-time">沙箱时间设为 2026-10-09 10:00 +08</button>
+        </div>
+      </form>
+      <p id="auth-state" class="hint"></p>
+    </section>
+
+    <section class="card">
+      <h2>2. 支付令牌</h2>
+      <p class="hint">只有授权保存成功后，这里才会返回 token。TTL 300 秒，成功支付后即作废。</p>
+      <div class="actions">
+        <button type="button" id="issue-token">签发支付令牌</button>
+      </div>
+      <p id="token-view" class="token">尚未签发</p>
+    </section>
+
+    <section class="card">
+      <h2>3. 沙箱下单</h2>
+      <p class="hint">成交金额只按目录单价 × 数量计算。客户端申报的 amount_cents 会被忽略。</p>
+      <div id="catalog" class="catalog"></div>
+      <div class="grid two" style="margin-top: 0.8rem">
+        <label>merchant_id
+          <input id="merchant-id" value="stationery-demo-001" />
+        </label>
+        <label>客户端申报 amount_cents（可选，不参与成交）
+          <input id="client-amount" type="number" min="0" step="1" placeholder="留空则不申报" />
+        </label>
+      </div>
+      <div class="actions">
+        <button type="button" id="pay">沙箱支付</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>4. 拒付演练</h2>
+      <p class="hint">每个按钮会重置沙箱、写入默示授权，并返回下列原因码之一。</p>
+      <div class="deny-actions">
+        <button type="button" class="secondary" data-deny="over_budget">超额 over_budget</button>
+        <button type="button" class="secondary" data-deny="merchant_not_allowed">非白名单 merchant_not_allowed</button>
+        <button type="button" class="secondary" data-deny="expired">过期 expired</button>
+        <button type="button" class="secondary" data-deny="token_reused">复用 token_reused</button>
+        <button type="button" class="secondary" data-deny="sku_not_allowed">非文具 sku_not_allowed</button>
+        <button type="button" class="secondary" id="reset">重置沙箱</button>
+      </div>
+    </section>
+
+    <section class="card span-2">
+      <h2>最近一次结果</h2>
+      <div id="reason"></div>
+      <pre id="result" class="result">等待操作</pre>
+    </section>
+
+    <section class="card span-2">
+      <h2>报销草稿</h2>
+      <div id="drafts">还没有草稿</div>
+    </section>
+  </main>
+  <footer>本地沙箱，不连接支付宝，不产生真实扣款。金额单位为分。</footer>
+  <script src="/app.js"></script>
+</body>
+</html>

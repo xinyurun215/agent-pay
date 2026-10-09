@@ -1,0 +1,221 @@
+:root {
+  color-scheme: light;
+  --paper: #f3efe6;
+  --card: #fffcf7;
+  --ink: #1e1914;
+  --muted: #6d6256;
+  --line: #e3d9c8;
+  --seal: #b4332a;
+  --seal-soft: #f8e8e4;
+  --ok: #1f6b45;
+  --ok-soft: #e5f4eb;
+  --shadow: 0 1px 0 rgba(30, 25, 20, 0.04);
+  font-family: "Avenir Next", "PingFang SC", "Noto Sans SC", "Segoe UI", sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+header, main, footer {
+  width: min(1120px, calc(100% - 2rem));
+  margin-inline: auto;
+}
+
+header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: end;
+  padding: 1.5rem 0 1rem;
+}
+
+h1 {
+  font-family: "Iowan Old Style", Palatino, "Songti SC", serif;
+  font-size: 1.8rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+h2 {
+  font-size: 1rem;
+  margin: 0 0 0.8rem;
+}
+
+.lede, .hint, footer {
+  color: var(--muted);
+}
+
+.lede { margin: 0.35rem 0 0; max-width: 42rem; }
+
+.clock {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.stamp {
+  display: inline-block;
+  border: 2px solid var(--seal);
+  color: var(--seal);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  padding: 0.15rem 0.4rem;
+  margin-bottom: 0.4rem;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  padding-bottom: 1rem;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+  padding: 1rem 1rem 1.1rem;
+}
+
+.span-2 { grid-column: 1 / -1; }
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+input, button {
+  font: inherit;
+}
+
+input {
+  border: 1px solid var(--line);
+  background: white;
+  color: var(--ink);
+  padding: 0.45rem 0.5rem;
+  min-width: 0;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.6rem;
+}
+
+.grid.two { grid-template-columns: 1fr 1fr; }
+
+.actions, .deny-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.8rem;
+}
+
+button {
+  border: 1px solid var(--ink);
+  background: var(--ink);
+  color: white;
+  padding: 0.45rem 0.7rem;
+  cursor: pointer;
+}
+
+button.secondary {
+  background: transparent;
+  color: var(--ink);
+}
+
+button:hover { opacity: 0.92; }
+
+button:disabled { opacity: 0.5; cursor: wait; }
+
+.catalog {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.sku {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 0.6rem;
+  align-items: center;
+  border-top: 1px solid var(--line);
+  padding-top: 0.45rem;
+}
+
+.sku strong { display: block; }
+
+.sku .meta { color: var(--muted); font-size: 0.82rem; }
+
+.sku input { width: 5rem; }
+
+.badge {
+  font-size: 0.75rem;
+  padding: 0.1rem 0.35rem;
+  border: 1px solid var(--line);
+}
+
+.badge.no { color: var(--seal); border-color: #e7c4be; background: var(--seal-soft); }
+
+.badge.yes { color: var(--ok); border-color: #b7dfc6; background: var(--ok-soft); }
+
+.token {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 0.86rem;
+  word-break: break-all;
+  margin: 0.6rem 0 0;
+}
+
+.result {
+  background: #201c18;
+  color: #f6f1e8;
+  padding: 0.8rem;
+  min-height: 8rem;
+  overflow: auto;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+  white-space: pre-wrap;
+}
+
+.reason {
+  display: inline-block;
+  margin: 0 0 0.5rem;
+  padding: 0.2rem 0.45rem;
+  background: var(--seal);
+  color: white;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+
+.reason.ok { background: var(--ok); }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+th, td {
+  text-align: left;
+  padding: 0.4rem 0.35rem;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+a { color: var(--seal); }
+
+footer { padding: 0.2rem 0 2rem; font-size: 0.85rem; }
+
+@media (max-width: 800px) {
+  .layout, .grid, .grid.two { grid-template-columns: 1fr; }
+  .span-2 { grid-column: auto; }
+  header { flex-direction: column; align-items: start; }
+  .clock { text-align: left; }
+  .sku { grid-template-columns: 1fr auto; }
+}
