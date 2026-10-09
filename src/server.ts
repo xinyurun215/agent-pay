@@ -4,11 +4,13 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import type { AlipayExecutor } from "./a2m.js";
 import { catalogView } from "./catalog.js";
 import { DenyError, HttpError } from "./errors.js";
 import { parseAuthorization, parseClock, parsePayCommand } from "./parse.js";
+import { createPurchaseApp, type PurchaseApp } from "./purchase.js";
 import { renderReceipt } from "./receipt.js";
-import { Sandbox } from "./service.js";
+import type { A2MConfig } from "./sandbox-config.js";
 import { DENY_REASONS } from "./types.js";
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "../public");
@@ -20,12 +22,18 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
   "/styles.css": { file: "styles.css", type: "text/css; charset=utf-8" },
 };
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
+function sendJson(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  extraHeaders?: Record<string, string>,
+): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
     "content-length": Buffer.byteLength(payload),
+    ...extraHeaders,
   });
   res.end(payload);
 }
@@ -75,11 +83,16 @@ async function sendStatic(res: ServerResponse, pathname: string): Promise<boolea
 
 export interface App {
   server: Server;
-  sandbox: Sandbox;
+  purchase: PurchaseApp;
+  close(): void;
 }
 
-export function createApp(): App {
-  const sandbox = new Sandbox();
+export function createApp(options: {
+  databasePath: string;
+  config: A2MConfig | null;
+  alipay?: AlipayExecutor | null;
+}): App {
+  const purchase = createPurchaseApp(options);
 
   const server = createServer((req, res) => {
     void handle(req, res).catch((error: unknown) => {
@@ -117,7 +130,9 @@ export function createApp(): App {
     if (method === "GET" && pathname === "/health") {
       sendJson(res, 200, {
         ok: true,
-        service: "agent-pay-sandbox",
+        service: "agent-pay",
+        payment_rail: "alipay.aipay.agent",
+        sandbox_configured: purchase.config !== null,
         deny_reasons: DENY_REASONS,
       });
       return;
@@ -129,47 +144,48 @@ export function createApp(): App {
     }
 
     if (method === "GET" && pathname === "/authorization") {
-      sendJson(res, 200, { ok: true, deny_reasons: DENY_REASONS, ...sandbox.authorizationView() });
+      sendJson(res, 200, { ok: true, deny_reasons: DENY_REASONS, ...purchase.authorizationView() });
       return;
     }
 
     if (method === "PUT" && pathname === "/authorization") {
-      const authorization = sandbox.setAuthorization(parseAuthorization(await readBody(req)));
+      const authorization = purchase.setAuthorization(parseAuthorization(await readBody(req)));
       sendJson(res, 200, { ok: true, authorized: true, authorization });
       return;
     }
 
     if (method === "POST" && pathname === "/payment-tokens") {
-      const token = sandbox.issueToken();
+      const token = purchase.issueToken();
       sendJson(res, 200, { ok: true, ...token });
       return;
     }
 
     const tokenMatch = pathname.match(/^\/payment-tokens\/([^/]+)$/);
     if (method === "GET" && tokenMatch) {
-      sendJson(res, 200, { ok: true, ...sandbox.getToken(decodeURIComponent(tokenMatch[1])) });
+      sendJson(res, 200, { ok: true, ...purchase.getToken(decodeURIComponent(tokenMatch[1])) });
       return;
     }
 
-    if (method === "POST" && pathname === "/payments") {
-      const result = sandbox.pay(parsePayCommand(await readBody(req)), requestBaseUrl(req));
-      sendJson(res, 200, {
-        ok: true,
-        order_id: result.order.order_id,
-        amount_cents: result.order.amount_cents,
-        ignored_client_amount_cents: result.ignored_client_amount_cents,
-        paid_at: result.order.paid_at,
-        merchant_name: result.order.merchant_name,
-        receipt_url: result.order.receipt_url,
-        expense_draft_id: result.expense_draft.expense_draft_id,
-        lines: result.order.lines,
-        receipt_callback: result.expense_draft,
-      });
+    if (method === "POST" && pathname === "/agent/purchase") {
+      const rawProof = req.headers["payment-proof"];
+      const proof = Array.isArray(rawProof) ? rawProof[0] : rawProof;
+      const baseUrl = requestBaseUrl(req);
+      if (proof && proof.trim() !== "") {
+        await readBody(req);
+        const verified = await purchase.verifyProof(proof, baseUrl);
+        const headers: Record<string, string> = {};
+        if (verified.status === 200) headers["Payment-Validation"] = verified.paymentValidation;
+        if (verified.status === 402 && verified.paymentNeeded) headers["Payment-Needed"] = verified.paymentNeeded;
+        sendJson(res, verified.status, verified.body, headers);
+        return;
+      }
+      const bill = purchase.createBill(parsePayCommand(await readBody(req)), baseUrl);
+      sendJson(res, 402, bill.body, { "Payment-Needed": bill.paymentNeeded });
       return;
     }
 
     if (method === "GET" && pathname === "/expense-drafts") {
-      sendJson(res, 200, { ok: true, expense_drafts: sandbox.listDrafts() });
+      sendJson(res, 200, { ok: true, expense_drafts: purchase.listDrafts() });
       return;
     }
 
@@ -177,35 +193,47 @@ export function createApp(): App {
     if (method === "GET" && draftMatch) {
       sendJson(res, 200, {
         ok: true,
-        expense_draft: sandbox.getDraft(decodeURIComponent(draftMatch[1])),
+        expense_draft: purchase.getDraft(decodeURIComponent(draftMatch[1])),
       });
       return;
     }
 
     const orderMatch = pathname.match(/^\/orders\/([^/]+)$/);
     if (method === "GET" && orderMatch) {
-      sendJson(res, 200, { ok: true, order: sandbox.getOrder(decodeURIComponent(orderMatch[1])) });
+      const order = purchase.getOrder(decodeURIComponent(orderMatch[1]));
+      sendJson(res, 200, {
+        ok: true,
+        order: {
+          order_id: order.outTradeNo,
+          amount_cents: order.amountCents,
+          paid_at: order.paidAt,
+          merchant_name: order.merchantName,
+          receipt_url: order.receiptUrl,
+          expense_draft_id: order.expenseDraftId,
+          lines: order.lines,
+        },
+      });
       return;
     }
 
     const receiptMatch = pathname.match(/^\/receipts\/([^/]+)$/);
     if (method === "GET" && receiptMatch) {
-      const order = sandbox.getOrder(decodeURIComponent(receiptMatch[1]));
+      const order = purchase.getOrder(decodeURIComponent(receiptMatch[1]));
+      const view = {
+        order_id: order.outTradeNo,
+        merchant_id: order.merchantId,
+        merchant_name: order.merchantName,
+        lines: order.lines,
+        amount_cents: order.amountCents,
+        paid_at: order.paidAt ?? "",
+        expense_draft_id: order.expenseDraftId ?? "",
+      };
       const accept = req.headers.accept ?? "";
       if (accept.includes("application/json")) {
-        sendJson(res, 200, {
-          ok: true,
-          order_id: order.order_id,
-          amount_cents: order.amount_cents,
-          paid_at: order.paid_at,
-          merchant_name: order.merchant_name,
-          receipt_url: order.receipt_url,
-          expense_draft_id: order.expense_draft_id,
-          lines: order.lines,
-        });
+        sendJson(res, 200, { ok: true, ...view });
         return;
       }
-      const html = renderReceipt(order);
+      const html = renderReceipt(view);
       res.writeHead(200, {
         "content-type": "text/html; charset=utf-8",
         "cache-control": "no-store",
@@ -216,19 +244,20 @@ export function createApp(): App {
     }
 
     if (method === "GET" && pathname === "/sandbox/clock") {
-      sendJson(res, 200, { ok: true, ...sandbox.clockView() });
+      sendJson(res, 200, { ok: true, ...purchase.clock.view() });
       return;
     }
 
     if (method === "POST" && pathname === "/sandbox/clock") {
       const clock = parseClock(await readBody(req));
-      const view = "reset" in clock ? sandbox.resetClock() : sandbox.setNow(clock.now);
-      sendJson(res, 200, { ok: true, ...view });
+      if ("reset" in clock) purchase.clock.reset();
+      else purchase.clock.set(clock.now);
+      sendJson(res, 200, { ok: true, ...purchase.clock.view() });
       return;
     }
 
     if (method === "POST" && pathname === "/sandbox/reset") {
-      sandbox.reset();
+      purchase.reset();
       sendJson(res, 200, { ok: true, reset: true });
       return;
     }
@@ -236,5 +265,11 @@ export function createApp(): App {
     sendJson(res, 404, { ok: false, error: "not_found", message: `No route for ${method} ${pathname}` });
   }
 
-  return { server, sandbox };
+  return {
+    server,
+    purchase,
+    close() {
+      purchase.close();
+    },
+  };
 }

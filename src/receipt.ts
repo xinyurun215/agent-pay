@@ -1,4 +1,14 @@
-import type { OrderRecord } from "./types.js";
+import type { OrderLine } from "./types.js";
+
+export interface ReceiptView {
+  order_id: string;
+  merchant_id: string;
+  merchant_name: string;
+  lines: OrderLine[];
+  amount_cents: number;
+  paid_at: string;
+  expense_draft_id: string;
+}
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => {
@@ -21,7 +31,7 @@ function yuan(cents: number): string {
   return (cents / 100).toFixed(2);
 }
 
-export function renderReceipt(order: OrderRecord): string {
+export function renderReceipt(order: ReceiptView): string {
   const rows = order.lines
     .map(
       (line) => `<tr>

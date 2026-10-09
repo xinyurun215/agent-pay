@@ -71,7 +71,7 @@
 
     <section class="card">
       <h2>3. 沙箱下单</h2>
-      <p class="hint">成交金额只按目录单价 × 数量计算。客户端申报的 amount_cents 会被忽略。</p>
+      <p class="hint">通过后按官方 AI 按量付费协议返回 HTTP 402 和 Payment-Needed。成交金额只按目录单价计算，客户端申报的 amount_cents 不会进入账单。携带支付宝沙箱返回的 Payment-Proof 再次请求后，才会验付并写入报销草稿。</p>
       <div id="catalog" class="catalog"></div>
       <div class="grid two" style="margin-top: 0.8rem">
         <label>merchant_id
@@ -82,7 +82,7 @@
         </label>
       </div>
       <div class="actions">
-        <button type="button" id="pay">沙箱支付</button>
+        <button type="button" id="pay">发起 402 支付账单</button>
       </div>
     </section>
 
@@ -110,7 +110,7 @@
       <div id="drafts">还没有草稿</div>
     </section>
   </main>
-  <footer>本地沙箱，不连接支付宝，不产生真实扣款。金额单位为分。</footer>
+  <footer>官方 AI 按量付费沙箱。402 账单由商户私钥本地签名，验付走支付宝沙箱网关，不产生真实扣款。金额单位为分。</footer>
   <script type="module" src="/app.js"></script>
 </body>
 </html>

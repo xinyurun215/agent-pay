@@ -1,8 +1,10 @@
-# Agent Pay · 办公文具采购沙箱
+# Agent Pay · 办公文具采购
 
-Local sandbox for an office agent that buys desktop stationery (签字笔 / A4纸 / 文件夹) from merchant `stationery-demo-001`. The user sets a budget, merchant whitelist, and validity window. Only then can the agent obtain a 300-second single-use payment token, pay at server-authoritative catalog prices, and receive a structured expense draft.
+Office agent checkout for desktop stationery (签字笔 / A4纸 / 文件夹) from merchant `stationery-demo-001`. The user sets a budget, merchant whitelist, and validity window. Only then can the agent take a 300-second single-use payment token.
 
-This process does not call Alipay and does not move real money.
+Payment itself is **not** a private protocol. A passing authorization creates an [AI 按量付费](https://aipay.alipay.com/docs/ai-receive/MACHINE_PAY.md) bill: HTTP 402 plus a Base64URL `Payment-Needed` header, signed locally with the merchant PKCS#1 key. The agent pays that bill in the Alipay sandbox, then retries with `Payment-Proof`. This service calls `alipay.aipay.agent.payment.verify` and `alipay.aipay.agent.fulfillment.confirm` through `alipay-sdk`. The expense draft is written only after verification matches the server price.
+
+No production Alipay credentials are required. Sandbox `service_id` stays `api_mock_service_id`.
 
 ## Authorization schema
 
@@ -19,10 +21,7 @@ This process does not call Alipay and does not move real money.
     "merchant_whitelist": ["stationery-demo-001"],
     "category": "desktop_stationery",
     "sku_keywords": ["签字笔", "A4纸", "文件夹"],
-    "payment_token": {
-      "ttl_seconds": 300,
-      "single_use": true
-    }
+    "payment_token": { "ttl_seconds": 300, "single_use": true }
   },
   "receipt_callback": {
     "order_id": "string",
@@ -36,38 +35,58 @@ This process does not call Alipay and does not move real money.
 }
 ```
 
-`payment_token.ttl_seconds` and `single_use` are fixed by the server. A client that sends other values still receives a 300-second single-use token.
+`payment_token.ttl_seconds` and `single_use` are fixed. Amounts are integer cents. The only payable product merchant is `stationery-demo-001`, and it must be on the whitelist. A SKU is allowed when its catalog name contains one `sku_keywords` entry. The Alipay seller id is the sandbox 2088 account inside `.alipay-sandbox.json`; it is not the product merchant id. Receipt `merchant_name` is `文具演示商户`.
 
-Amounts are integer cents. The only payable merchant is `stationery-demo-001`, and it must also appear in the whitelist. A SKU is allowed when its catalog name contains one of `sku_keywords` as a substring.
+## Install the official skill
+
+```bash
+npx -y @alipay/alipay-aipay@latest install
+```
+
+That skill covers three products. This MVP uses **AI 按量付费** (Agent Pay / 402 / A2M):
+
+- No `Payment-Proof`: respond `402` with `Payment-Needed` (`out_trade_no`, `amount`, `currency=CNY`, `resource_id`, `pay_before`, `seller_signature`, `seller_sign_type=RSA2`, `seller_unique_id`, plus method `seller_id`, `seller_app_id`, `goods_name`, `service_id`).
+- With `Payment-Proof`: `alipay.aipay.agent.payment.verify`, then `alipay.aipay.agent.fulfillment.confirm`.
+- Sandbox gateway `https://openapi-sandbox.dl.alipaydev.com/gateway.do`.
+- Sandbox `service_id=api_mock_service_id` (do not use it in production).
+- Node.js reads `appPrivatePkcsKey` (PKCS#1). Do not add PEM headers.
+
+Quick sandbox on Linux, from the installed skill directory:
+
+```bash
+node "<SKILL_DIR>/references/normal/scripts/runtime.mjs" sandbox ensure "<project path>" "Node.js" --agent-platform "Cursor" --session-id "<SESSION_ID>"
+```
+
+`SESSION_ID` comes from the skill's `telemetry resolve-session` command. A ready run writes `/.alipay-sandbox.json` with mode `0600`. That file is gitignored and must stay out of git. Do not paste private keys, buyer passwords, or `Payment-Proof` values into the README, logs, or commits.
+
+Live cashier completion, after this server is up and a token exists, uses the skill's A2M runner (`a2m run --auto-complete --require-payment-validation`) against `POST /agent/purchase`. The buyer id is the sandbox buyer's `userId` from the local config. The runner posts the original JSON body, reads `Payment-Needed`, pays at the sandbox cashier, and retries with `Payment-Proof`.
 
 ## Run
 
-Requires Node.js 22+.
+Node.js 22+.
 
 ```bash
 npm install
 npm start
 ```
 
-Open http://127.0.0.1:3000.
-
-The page can save the default authorization, issue a token, pay, and trigger each deny reason. Use **沙箱时间设为 2026-10-09 10:00 +08** when the machine clock is outside the sample validity window. State is in memory and resets when the process restarts. `POST /sandbox/reset` clears it immediately.
+Open http://127.0.0.1:3000. Orders live in `data/agent-pay.sqlite` (gitignored). `POST /sandbox/reset` clears authorization, tokens, and orders. It does not delete `.alipay-sandbox.json`.
 
 ```bash
 npm test
 npm run typecheck
 ```
 
-## Catalog (server prices)
+`npm test` does not call Alipay. It drives the same verify and confirm method names through a scripted `alipay-sdk` executor, and it checks the merchant RSA2 signature on `Payment-Needed`.
+
+## Catalog
 
 | SKU | Name | Unit price |
 | --- | --- | --- |
-| `sku-pen` | 黑色签字笔 | 800 cents |
+| `sku-pen` | 黑色签字笔 | 800 cents (`8.00` CNY) |
 | `sku-paper` | A4纸 70g 500张 | 2500 cents |
 | `sku-folder` | 资料文件夹 | 1200 cents |
-| `sku-mug` | 陶瓷马克杯 | 3900 cents (keyword miss, for `sku_not_allowed`) |
-
-`文具演示商户` is the receipt `merchant_name` for `stationery-demo-001`.
+| `sku-mug` | 陶瓷马克杯 | 3900 cents (keyword miss) |
 
 ## Demo: happy path
 
@@ -84,66 +103,53 @@ curl -s -X PUT $BASE/authorization \
     "budget": {"per_order_cents": 50000, "daily_cents": 200000, "total_cents": 500000},
     "valid_from": "2026-10-09T00:00:00+08:00",
     "valid_to": "2026-10-16T23:59:59+08:00",
-    "merchant_whitelist": ["stationery-demo-001"],
-    "category": "desktop_stationery",
-    "sku_keywords": ["签字笔", "A4纸", "文件夹"]
+    "merchant_whitelist": ["stationery-demo-001"]
   }'
 
 TOKEN=$(curl -s -X POST $BASE/payment-tokens | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>process.stdout.write(JSON.parse(s).token))")
 
-curl -s -X POST $BASE/payments \
+curl -sD - -X POST $BASE/agent/purchase \
   -H 'content-type: application/json' \
   -d "{\"token\":\"$TOKEN\",\"merchant_id\":\"stationery-demo-001\",\"items\":[{\"sku_id\":\"sku-pen\",\"quantity\":1}],\"amount_cents\":1}"
-
-curl -s $BASE/expense-drafts
 ```
 
-Before the `PUT`, `POST /payment-tokens` returns `403` and `authorization_required`.
+Before `PUT /authorization`, token issuance returns `403` `authorization_required`.
 
-The payment response `amount_cents` is `800`, not the client-supplied `1`. The same object is stored as the expense draft:
+The purchase response is HTTP 402. Body `amount` is `8.00` and `amount_cents` is `800`, not the client value `1`. The `Payment-Needed` header is the bill the sandbox cashier pays. A second purchase with the same token and no `Payment-Proof` returns `token_reused`.
 
-- `order_id`
-- `amount_cents`
-- `paid_at`
-- `merchant_name`
-- `receipt_url`
-- `expense_draft_id`
+After a `Payment-Proof` verifies, `GET /expense-drafts` contains `order_id`, `amount_cents`, `paid_at`, `merchant_name`, `receipt_url`, and `expense_draft_id`. Open `receipt_url` for the receipt. If `alipay.aipay.agent.fulfillment.confirm` fails, the draft is not listed; retry the same `Payment-Proof`.
 
-Open `receipt_url` for the human-readable receipt. A second charge with the same token returns `token_reused`.
-
-Change `budget` or `valid_from` / `valid_to` on `PUT /authorization` before issuing a token. The new limits apply to later payments. Existing spend still counts toward the daily and total caps.
+Change `budget` or the validity window with `PUT /authorization` before issuing a token. Pending unpaid bills reserve budget until `pay_before` (30 minutes). Fulfilled payments keep counting.
 
 ## Demo: deny reasons
 
-Checks run in this order: token TTL, authorization window, single-use, merchant, SKU keywords, then budget (per order, then the Asia/Shanghai calendar day, then the total). A denied attempt does not consume the token. A successful payment does.
-
-Set the clock and authorization as in the happy path, then:
+Checks before a bill is signed: token TTL, authorization window, single-use, merchant, SKU keywords, then budget (per order, Asia/Shanghai day, total). A deny does not consume the token and does not call Alipay. Set the clock and authorization as in the happy path, then issue a token.
 
 ### `over_budget`
 
 63 × `sku-pen` is 50400 cents, above the default per-order cap of 50000.
 
 ```bash
-curl -s -X POST $BASE/payments \
+curl -s -X POST $BASE/agent/purchase \
   -H 'content-type: application/json' \
   -d "{\"token\":\"$TOKEN\",\"merchant_id\":\"stationery-demo-001\",\"items\":[{\"sku_id\":\"sku-pen\",\"quantity\":63}]}"
 ```
 
-The same code is returned when the charge would exceed `daily_cents` or `total_cents`. The `limit` field is `per_order`, `daily`, or `total`.
+The same code is returned when the charge would exceed `daily_cents` or `total_cents`. `limit` is `per_order`, `daily`, or `total`.
 
 ### `merchant_not_allowed`
 
 ```bash
-curl -s -X POST $BASE/payments \
+curl -s -X POST $BASE/agent/purchase \
   -H 'content-type: application/json' \
   -d "{\"token\":\"$TOKEN\",\"merchant_id\":\"cafe-demo-009\",\"items\":[{\"sku_id\":\"sku-pen\",\"quantity\":1}]}"
 ```
 
-Paying `stationery-demo-001` after removing it from `merchant_whitelist` is the same code. Adding any other merchant to the whitelist does not make that merchant payable.
+Paying `stationery-demo-001` after removing it from the whitelist is the same code. Whitelisting another merchant does not make that merchant payable.
 
 ### `expired`
 
-Move the sandbox clock to one second after the token's `expires_at` (still inside the authorization window) and pay:
+Move the clock to one second after the token `expires_at` and purchase. The same code is returned when `now` is outside `valid_from` / `valid_to`, including token issuance.
 
 ```bash
 curl -s -X POST $BASE/sandbox/clock \
@@ -151,54 +157,42 @@ curl -s -X POST $BASE/sandbox/clock \
   -d '{"now":"2026-10-09T10:05:01+08:00"}'
 ```
 
-The same code is returned when `now` is outside `valid_from` / `valid_to`, including token issuance. `POST /sandbox/clock` with `{"reset": true}` returns to the system clock.
+`{"reset": true}` returns to the system clock.
 
 ### `token_reused`
 
-Pay once successfully, then `POST /payments` again with the same token.
+Create a 402 bill, then `POST /agent/purchase` again with the same token and no `Payment-Proof`.
 
 ### `sku_not_allowed`
 
 ```bash
-curl -s -X POST $BASE/payments \
+curl -s -X POST $BASE/agent/purchase \
   -H 'content-type: application/json' \
   -d "{\"token\":\"$TOKEN\",\"merchant_id\":\"stationery-demo-001\",\"items\":[{\"sku_id\":\"sku-mug\",\"quantity\":1}]}"
 ```
 
-Unknown `sku_id` values return the same code. Names match by substring, so `黑色签字笔` matches `签字笔`.
+Unknown `sku_id` values return the same code.
 
 ## API
 
 | Method | Path | |
 | --- | --- | --- |
-| `GET` | `/health` | Service name and `deny_reasons` |
-| `GET` | `/catalog` | Merchant and authoritative SKU prices |
-| `GET` | `/authorization` | Current authorization, defaults, deny reasons |
+| `GET` | `/health` | Rail name, whether sandbox config is loaded, `deny_reasons` |
+| `GET` | `/catalog` | Authoritative SKU prices |
+| `GET` | `/authorization` | Current authorization and defaults |
 | `PUT` | `/authorization` | Set budget, whitelist, and validity |
 | `POST` | `/payment-tokens` | Issue a token after authorization |
 | `GET` | `/payment-tokens/:token` | Token status, including `used` |
-| `POST` | `/payments` | Sandbox pay |
-| `GET` | `/orders/:orderId` | Paid order and line items |
-| `GET` | `/expense-drafts` | Receipt callbacks written so far |
+| `POST` | `/agent/purchase` | 402 `Payment-Needed`, or verify `Payment-Proof` |
+| `GET` | `/orders/:orderId` | Fulfilled order |
+| `GET` | `/expense-drafts` | Receipt callbacks |
 | `GET` | `/expense-drafts/:id` | One draft |
-| `GET` | `/receipts/:orderId` | HTML receipt (`Accept: application/json` for JSON) |
-| `GET` | `/sandbox/clock` | Current instant |
-| `POST` | `/sandbox/clock` | `{ "now": "<iso>" }` or `{ "reset": true }` |
-| `POST` | `/sandbox/reset` | Clear authorization, tokens, orders, and the clock |
+| `GET` | `/receipts/:orderId` | HTML receipt |
+| `GET` / `POST` | `/sandbox/clock` | Read or set the demo clock |
+| `POST` | `/sandbox/reset` | Clear authorization, tokens, and orders |
 
-Denied payments respond with HTTP 403:
+Denied purchases respond with HTTP 403:
 
 ```json
 { "ok": false, "deny_reason": "over_budget", "message": "..." }
 ```
-
-## Tests
-
-`npm test` covers:
-
-- no token until authorization is saved
-- token TTL of 300 seconds and `single_use: true`
-- successful pay, server amount, and expense draft fields
-- client `amount_cents` ignored, including a value above the budget
-- all five deny reasons, plus daily and total budget caps
-- token remains unused after a deny and is consumed after success

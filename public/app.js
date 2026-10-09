@@ -11,6 +11,13 @@ const authStateEl = document.querySelector("#auth-state");
 let currentToken = null;
 let catalog = [];
 
+function decodeBase64Url(value) {
+  const padded = value + "=".repeat((4 - (value.length % 4)) % 4);
+  const normalized = padded.replace(/-/g, "+").replace(/_/g, "/");
+  const bytes = Uint8Array.from(atob(normalized), (char) => char.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
@@ -20,17 +27,36 @@ async function api(path, options = {}) {
     },
   });
   const body = await response.json();
-  return { status: response.status, body };
+  const paymentNeeded = response.headers.get("payment-needed");
+  let payment_needed = null;
+  if (paymentNeeded) {
+    try {
+      payment_needed = JSON.parse(decodeBase64Url(paymentNeeded));
+    } catch {
+      payment_needed = null;
+    }
+  }
+  return { status: response.status, body, payment_needed };
 }
 
 function show(payload, status) {
   const reason = payload.deny_reason;
   if (reason) {
-    reasonEl.innerHTML = `<span class="reason">${reason}</span>`;
+    reasonEl.textContent = "";
+    const badge = document.createElement("span");
+    badge.className = "reason";
+    badge.textContent = reason;
+    reasonEl.append(badge);
+  } else if (status === 402) {
+    reasonEl.innerHTML = `<span class="reason">Payment-Needed</span>`;
   } else if (payload.ok) {
     reasonEl.innerHTML = `<span class="reason ok">ok ${status}</span>`;
   } else {
-    reasonEl.innerHTML = `<span class="reason">${payload.error ?? "error"}</span>`;
+    reasonEl.textContent = "";
+    const badge = document.createElement("span");
+    badge.className = "reason";
+    badge.textContent = payload.error ?? payload.code ?? "error";
+    reasonEl.append(badge);
   }
   resultEl.textContent = JSON.stringify(payload, null, 2);
 }
@@ -173,11 +199,11 @@ async function issueToken() {
 }
 
 async function payWith(payload) {
-  const { status, body } = await api("/payments", {
+  const { status, body, payment_needed } = await api("/agent/purchase", {
     method: "POST",
     body: JSON.stringify(payload),
   });
-  show(body, status);
+  show({ http_status: status, ...body, payment_needed }, status);
   await refreshDrafts();
   if (currentToken) {
     const token = await api(`/payment-tokens/${encodeURIComponent(currentToken)}`);
@@ -185,7 +211,7 @@ async function payWith(payload) {
       tokenEl.textContent = `${token.body.token}\nused ${token.body.used} · single_use ${token.body.single_use}\nexpires ${token.body.expires_at}`;
     }
   }
-  return body;
+  return { status, body, payment_needed };
 }
 
 async function prepareDemo() {
@@ -303,7 +329,7 @@ const denyHandlers = {
       merchant_id: MERCHANT_ID,
       items: [{ sku_id: "sku-pen", quantity: 1 }],
     });
-    if (!first.ok) return;
+    if (first.status !== 402) return;
     await payWith({
       token: token.token,
       merchant_id: MERCHANT_ID,
