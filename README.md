@@ -301,7 +301,9 @@ Unknown `sku_id` values return the same code.
 | `GET` | `/authorization/audit` | Confirm, revoke, token, order, and fulfill events. Admin bearer |
 | `POST` | `/payment-tokens` | Issue a token after user confirmation. Admin bearer |
 | `GET` | `/payment-tokens/:token` | Token status. Admin bearer |
-| `POST` | `/agent/purchase` | Create the `page.pay` cashier URL |
+| `POST` | `/agent/propose` | Split one sentence into catalog lines, quantities, and remaining budget. No cashier URL |
+| `POST` | `/agent/plans/:id/confirm` | After the user confirms that quote, create the `page.pay` URL from the stored lines |
+| `POST` | `/agent/purchase` | Create the `page.pay` cashier URL. Returns `409` `plan_not_confirmed` while a spoken plan for that token is still open |
 | `POST` | `/agent/orders/:id/confirm` | `alipay.trade.query`, then the expense draft. Admin bearer |
 | `POST` | `/alipay/notify` | Signed Alipay notify. `success` after fulfill, on a repeat, or when the unpaid order's authorization changed. `failure` otherwise. No draft in the changed-authorization case |
 | `GET` | `/orders/:orderId` | Fulfilled order. Admin bearer |
@@ -311,6 +313,8 @@ Unknown `sku_id` values return the same code.
 | `GET` | `/sandbox/clock` | Read the demo clock |
 | `POST` | `/sandbox/clock` | Set the demo clock. Admin bearer |
 | `POST` | `/sandbox/reset` | Clear authorization, confirmation, tokens, orders, and audit. Admin bearer |
+
+A spoken request uses the same catalog prices. `POST /agent/propose` with `{ "token", "text" }` either asks a question (`422` `needs_clarification`), refuses something outside the current keywords (`422` `not_purchasable`, with no substitute SKU), or returns a plan: SKU, quantity, unit price, total, and remaining budget. Unstated quantity on a uniquely named whitelist item is 1. Vague wording is not filled in. The 1-cent pen is selected only when the sentence says so. `POST /agent/plans/:id/confirm` is what signs `page.pay`. Client prices on either call are ignored. An over-budget plan stays at the original quantities and is not replaced by a cheaper SKU. The recording script is `docs/demo-recording.md`. It leaves the trade number blank.
 
 Denied purchases respond with HTTP 403:
 

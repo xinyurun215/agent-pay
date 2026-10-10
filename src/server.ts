@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { createProductPayClient } from "./alipay-client.js";
 import { catalogView } from "./catalog.js";
 import { DenyError, HttpError } from "./errors.js";
-import { parseAuthorization, parseClock, parsePayCommand } from "./parse.js";
+import { parseAuthorization, parseClock, parsePayCommand, parsePlanConfirm, parseProposeCommand } from "./parse.js";
 import { rejectClientPrincipal, resolveDemoPrincipal } from "./principal.js";
 import type { ProductPayClient } from "./product-pay.js";
 import { createPurchaseApp, type PurchaseApp } from "./purchase.js";
@@ -291,11 +291,35 @@ export function createApp(options: {
       return;
     }
 
-    if (method === "POST" && pathname === "/agent/purchase") {
-      const bill = purchase.createCashier(
-        parsePayCommand(parseJsonBody(await readRaw(req))),
+    if (method === "POST" && pathname === "/agent/propose") {
+      const command = parseProposeCommand(parseJsonBody(await readRaw(req)));
+      const proposed = purchase.propose(command);
+      sendJson(res, proposed.status, proposed.body);
+      return;
+    }
+
+    const planMatch = pathname.match(/^\/agent\/plans\/([^/]+)\/confirm$/);
+    if (method === "POST" && planMatch) {
+      const command = parsePlanConfirm(parseJsonBody(await readRaw(req)));
+      const confirmed = purchase.confirmPlan(
+        decodeURIComponent(planMatch[1]),
+        command.token,
         requestBaseUrl(req, publicBaseUrl, trustProxy),
       );
+      sendJson(res, 200, confirmed);
+      return;
+    }
+
+    if (method === "POST" && pathname === "/agent/purchase") {
+      const command = parsePayCommand(parseJsonBody(await readRaw(req)));
+      if (purchase.hasOpenPlan(command.token)) {
+        throw new HttpError(
+          409,
+          "plan_not_confirmed",
+          "Confirm the spoken plan before creating a cashier URL",
+        );
+      }
+      const bill = purchase.createCashier(command, requestBaseUrl(req, publicBaseUrl, trustProxy));
       sendJson(res, 200, bill);
       return;
     }

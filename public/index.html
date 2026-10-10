@@ -79,11 +79,20 @@
         <h2>2. 下单</h2>
         <span class="step-status wait" id="status-order">未下单</span>
       </div>
-      <p class="hint">先签发 300 秒单次令牌，再创建订单。成交价只按目录单价计算，客户端填写的金额不参与成交。通过后得到电脑网站支付的收银台链接。</p>
+      <p class="hint">先签发 300 秒单次令牌。用一句话说明要买什么，先看方案里的商品、数量、单价、总价和剩余预算。确认方案后才生成收银台链接。价格只按服务端目录计算。</p>
       <div class="actions">
         <button type="button" id="issue-token">签发支付令牌</button>
       </div>
       <p id="token-view" class="token">尚未签发</p>
+      <label>自然语言需求
+        <textarea id="intent-text" rows="2" placeholder="例如：会议室缺笔和 A4 纸，下周开会用"></textarea>
+      </label>
+      <div class="actions">
+        <button type="button" id="propose">听懂并出方案</button>
+        <button type="button" id="confirm-plan" hidden>确认方案并生成收银台</button>
+      </div>
+      <div id="plan" class="plan"></div>
+      <p class="hint">下面的目录数量是手动下单。有待确认方案时，直接购买不会出收银台。</p>
       <div id="catalog" class="catalog"></div>
       <div class="grid two" style="margin-top: 0.8rem">
         <label>商户编号

@@ -131,17 +131,21 @@ label {
   color: var(--muted);
 }
 
-input, button {
+input, textarea, button {
   font: inherit;
 }
 
-input {
+input, textarea {
   border: 1px solid var(--line);
   background: white;
   color: var(--ink);
   padding: 0.45rem 0.5rem;
   min-width: 0;
 }
+
+textarea { min-height: 4.2rem; resize: vertical; }
+
+.plan { margin-top: 0.8rem; }
 
 .grid {
   display: grid;

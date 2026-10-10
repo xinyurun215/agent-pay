@@ -152,6 +152,29 @@ export function parsePayCommand(body: unknown): PayCommand {
   };
 }
 
+export function parseProposeCommand(body: unknown): { token: string; text: string } {
+  const record = requireObject(body);
+  if (typeof record.token !== "string" || record.token.trim().length === 0) {
+    throw new HttpError(400, "token_required", "token is required");
+  }
+  if (typeof record.text !== "string" || record.text.trim().length === 0) {
+    throw new HttpError(400, "text_required", "text is required");
+  }
+  const text = record.text.trim();
+  if (text.length > 500) {
+    throw new HttpError(400, "text_too_long", "text must be at most 500 characters");
+  }
+  return { token: record.token.trim(), text };
+}
+
+export function parsePlanConfirm(body: unknown): { token: string } {
+  const record = requireObject(body);
+  if (typeof record.token !== "string" || record.token.trim().length === 0) {
+    throw new HttpError(400, "token_required", "token is required");
+  }
+  return { token: record.token.trim() };
+}
+
 export function parseClock(body: unknown): { reset: true } | { now: string } {
   const record = requireObject(body);
   if (record.reset === true) {

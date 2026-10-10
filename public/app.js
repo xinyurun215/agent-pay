@@ -239,6 +239,7 @@ async function issueToken() {
   if (body.ok) {
     currentToken = body.token;
     tokenEl.textContent = `${body.token}\n签发 ${body.issued_at}\n到期 ${body.expires_at}\n有效 ${body.ttl_seconds} 秒，单次使用`;
+    clearPlan();
     setStatus("order", "wait", "已签发令牌");
   }
   return body;
@@ -259,16 +260,7 @@ async function payWith(payload) {
     method: "POST",
     body: JSON.stringify(payload),
   });
-  if (body.out_trade_no) lastOutTradeNo = body.out_trade_no;
-  if (body.page_redirection_data) {
-    document.querySelector("#cashier-url").textContent = body.page_redirection_data;
-    document.querySelector("#submit-command").textContent = body.alipay_bot?.submit_payment ?? "";
-    setStatus("order", "ok", `已定价 ${body.total_amount} 元`);
-    setStatus("cashier", "wait", "未执行支付");
-    setStatus("receipt", "wait", "待查询");
-  }
-  if (body.deny_reason) setStatus("deny", "bad", body.deny_reason);
-  show({ http_status: status, ...body }, status);
+  showCashier(status, body);
   await refreshDrafts();
   if (currentToken) {
     const token = await api(`/payment-tokens/${encodeURIComponent(currentToken)}`);
@@ -327,6 +319,42 @@ document.querySelector("#revoke-auth").addEventListener("click", async () => {
   await refreshAuth();
 });
 document.querySelector("#issue-token").addEventListener("click", () => issueToken());
+document.querySelector("#propose").addEventListener("click", async () => {
+  if (!currentToken) {
+    show({ ok: false, error: "token_required", message: "请先签发支付令牌" }, 400);
+    return;
+  }
+  const text = document.querySelector("#intent-text").value.trim();
+  if (!text) {
+    show({ ok: false, error: "text_required", message: "请先写下要买什么" }, 400);
+    return;
+  }
+  const { status, body } = await api("/agent/propose", {
+    method: "POST",
+    body: JSON.stringify({ token: currentToken, text }),
+  });
+  renderPlan(body);
+  show({ http_status: status, ...body }, status);
+});
+document.querySelector("#confirm-plan").addEventListener("click", async () => {
+  const planId = document.querySelector("#confirm-plan").dataset.planId;
+  if (!currentToken || !planId) {
+    show({ ok: false, error: "plan_required", message: "请先听懂并出方案" }, 400);
+    return;
+  }
+  const { status, body } = await api(`/agent/plans/${encodeURIComponent(planId)}/confirm`, {
+    method: "POST",
+    body: JSON.stringify({ token: currentToken }),
+  });
+  showCashier(status, body);
+  await refreshDrafts();
+  if (currentToken) {
+    const token = await api(`/payment-tokens/${encodeURIComponent(currentToken)}`);
+    if (token.body.ok) {
+      tokenEl.textContent = `${token.body.token}\nused ${token.body.used} · single_use ${token.body.single_use}\nexpires ${token.body.expires_at}`;
+    }
+  }
+});
 document.querySelector("#confirm-trade").addEventListener("click", async () => {
   if (!lastOutTradeNo) {
     show({ ok: false, error: "order_required", message: "请先创建收银台链接" }, 400);
@@ -359,12 +387,93 @@ document.querySelector("#pay").addEventListener("click", async () => {
   await payWith(payload);
 });
 
+function clearPlan() {
+  const planEl = document.querySelector("#plan");
+  planEl.replaceChildren();
+  const confirmPlan = document.querySelector("#confirm-plan");
+  confirmPlan.hidden = true;
+  delete confirmPlan.dataset.planId;
+}
+
 function clearCashier() {
   document.querySelector("#cashier-url").textContent = "下单成功后显示在这里。";
   document.querySelector("#submit-command").textContent =
     "alipay-bot submit-payment --session-id $AIPAY_SESSION_ID --payment-link '<原始 page.pay URL>' --intent-summary '服务内容：…，支付金额：¥…，支付对象：文具演示商户'";
   setStatus("order", "wait", "未下单");
   setStatus("cashier", "wait", "未执行支付");
+  clearPlan();
+}
+
+function showCashier(status, body) {
+  if (body.out_trade_no) lastOutTradeNo = body.out_trade_no;
+  if (body.page_redirection_data) {
+    document.querySelector("#cashier-url").textContent = body.page_redirection_data;
+    document.querySelector("#submit-command").textContent = body.alipay_bot?.submit_payment ?? "";
+    setStatus("order", "ok", `已定价 ${body.total_amount} 元`);
+    setStatus("cashier", "wait", "未执行支付");
+    setStatus("receipt", "wait", "待查询");
+  }
+  if (body.deny_reason) setStatus("deny", "bad", body.deny_reason);
+  show({ http_status: status, ...body }, status);
+}
+
+function renderPlan(body) {
+  const planEl = document.querySelector("#plan");
+  const confirmPlan = document.querySelector("#confirm-plan");
+  planEl.replaceChildren();
+  confirmPlan.hidden = true;
+  delete confirmPlan.dataset.planId;
+  if (body.error === "needs_clarification") {
+    setStatus("order", "wait", "需要说明");
+    const list = document.createElement("ul");
+    for (const question of body.questions ?? [body.message]) {
+      const item = document.createElement("li");
+      item.textContent = question;
+      list.append(item);
+    }
+    planEl.append(list);
+    return;
+  }
+  if (body.error === "not_purchasable") {
+    setStatus("order", "bad", "买不了");
+    const list = document.createElement("ul");
+    for (const rejected of body.rejected ?? []) {
+      const item = document.createElement("li");
+      item.textContent = rejected.message;
+      list.append(item);
+    }
+    planEl.append(list);
+    return;
+  }
+  if (!body.ok || !Array.isArray(body.lines)) return;
+  const table = document.createElement("table");
+  table.innerHTML = "<thead><tr><th>商品</th><th>数量</th><th>单价（分）</th><th>小计（分）</th></tr></thead>";
+  const tbody = document.createElement("tbody");
+  for (const line of body.lines) {
+    const row = document.createElement("tr");
+    for (const value of [line.name, line.quantity, line.unit_price_cents, line.line_cents]) {
+      const cell = document.createElement("td");
+      cell.textContent = String(value);
+      row.append(cell);
+    }
+    tbody.append(row);
+  }
+  table.append(tbody);
+  planEl.append(table);
+  const budget = body.budget ?? {};
+  const summary = document.createElement("p");
+  summary.textContent = `总价 ${body.amount_cents} 分（${body.total_amount} 元）。单笔上限 ${budget.per_order_cents} 分，今日剩余 ${budget.remaining_daily_cents} 分，总额剩余 ${budget.remaining_total_cents} 分。`;
+  planEl.append(summary);
+  if (body.confirmable) {
+    confirmPlan.hidden = false;
+    confirmPlan.dataset.planId = body.plan_id;
+    setStatus("order", "wait", "待确认方案");
+  } else {
+    const note = document.createElement("p");
+    note.textContent = body.message || "这个方案不能确认。";
+    planEl.append(note);
+    setStatus("order", "bad", body.deny_reason || "不能确认");
+  }
 }
 
 document.querySelector("#reset").addEventListener("click", async () => {

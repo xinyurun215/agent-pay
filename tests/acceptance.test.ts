@@ -795,6 +795,184 @@ test("deny merchant_not_allowed, expired, token_reused, and sku_not_allowed", as
   }
 });
 
+async function propose(base: string, token: string, text: string, extra: Record<string, unknown> = {}): Promise<ApiResult> {
+  return api(base, "/agent/propose", {
+    method: "POST",
+    body: JSON.stringify({ token, text, ...extra }),
+  });
+}
+
+test("natural language request splits pens and A4 paper into a server-priced plan", async () => {
+  const app = await start();
+  try {
+    await boot(app.base);
+    const token = await issue(app.base);
+    const catalog = await api(app.base, "/catalog");
+    const proposed = await propose(app.base, token.token, "会议室缺笔和 A4 纸，下周开会用");
+    assert.equal(proposed.status, 200, JSON.stringify(proposed.body));
+    assert.equal(proposed.body.ok, true);
+    assert.equal(proposed.body.confirmable, true);
+    assert.equal(proposed.body.page_redirection_data, undefined);
+    assert.equal(proposed.body.amount_cents, 3_300);
+    assert.equal(proposed.body.total_amount, "33.00");
+    assert.deepEqual(
+      proposed.body.lines.map((line: { sku_id: string; quantity: number }) => ({
+        sku_id: line.sku_id,
+        quantity: line.quantity,
+      })),
+      [
+        { sku_id: "sku-pen", quantity: 1 },
+        { sku_id: "sku-paper", quantity: 1 },
+      ],
+    );
+    for (const line of proposed.body.lines) {
+      const sku = catalog.body.skus.find((item: { sku_id: string }) => item.sku_id === line.sku_id);
+      assert.equal(line.unit_price_cents, sku.unit_price_cents);
+      assert.equal(line.line_cents, sku.unit_price_cents * line.quantity);
+    }
+    assert.equal(proposed.body.budget.remaining_daily_cents, 200_000);
+    assert.equal(proposed.body.budget.remaining_total_cents, 500_000);
+    assert.equal(proposed.body.budget.per_order_cents, 50_000);
+  } finally {
+    await app.close();
+  }
+});
+
+test("vague demand asks for clarification and does not open a cashier", async () => {
+  const app = await start();
+  try {
+    await boot(app.base);
+    const token = await issue(app.base);
+    const proposed = await propose(app.base, token.token, "买点东西，下周开会用");
+    assert.equal(proposed.status, 422, JSON.stringify(proposed.body));
+    assert.equal(proposed.body.ok, false);
+    assert.equal(proposed.body.error, "needs_clarification");
+    assert.ok(proposed.body.questions.length >= 1);
+    assert.equal(proposed.body.plan_id, undefined);
+    assert.equal(proposed.body.page_redirection_data, undefined);
+    const direct = await purchase(app.base, token.token, [{ sku_id: "sku-pen", quantity: 1 }]);
+    assert.equal(direct.status, 200, JSON.stringify(direct.body));
+    assert.equal(direct.body.page_redirection_data === undefined, false);
+  } finally {
+    await app.close();
+  }
+});
+
+test("an item outside the keyword whitelist is refused without a substitute", async () => {
+  const app = await start();
+  try {
+    await boot(app.base);
+    const token = await issue(app.base);
+    const proposed = await propose(app.base, token.token, "会议室缺笔和马克杯");
+    assert.equal(proposed.status, 422, JSON.stringify(proposed.body));
+    assert.equal(proposed.body.error, "not_purchasable");
+    assert.equal(proposed.body.page_redirection_data, undefined);
+    assert.equal(proposed.body.lines, undefined);
+    assert.equal(proposed.body.plan_id, undefined);
+    const names = proposed.body.rejected.map((item: { name: string }) => item.name).join(" ");
+    assert.match(names, /马克杯/);
+    assert.equal(JSON.stringify(proposed.body).includes("sku-pen"), false);
+    assert.equal(JSON.stringify(proposed.body).includes("sku-pen-cent"), false);
+  } finally {
+    await app.close();
+  }
+});
+
+test("confirmed plan total matches the catalog quote", async () => {
+  const app = await start();
+  try {
+    await boot(app.base);
+    const token = await issue(app.base);
+    const catalog = await api(app.base, "/catalog");
+    const proposed = await propose(app.base, token.token, "两支笔和一包A4纸", {
+      amount_cents: 1,
+      items: [{ sku_id: "sku-mug", quantity: 9, unit_price_cents: 1 }],
+    });
+    assert.equal(proposed.status, 200, JSON.stringify(proposed.body));
+    const pen = catalog.body.skus.find((item: { sku_id: string }) => item.sku_id === "sku-pen");
+    const paper = catalog.body.skus.find((item: { sku_id: string }) => item.sku_id === "sku-paper");
+    assert.equal(proposed.body.amount_cents, pen.unit_price_cents * 2 + paper.unit_price_cents);
+    assert.equal(proposed.body.lines[0].unit_price_cents, pen.unit_price_cents);
+    assert.equal(proposed.body.lines[1].unit_price_cents, paper.unit_price_cents);
+    const confirmed = await api(app.base, `/agent/plans/${proposed.body.plan_id}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({
+        token: token.token,
+        amount_cents: 1,
+        items: [{ sku_id: "sku-mug", quantity: 99 }],
+      }),
+    });
+    assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body));
+    assert.equal(confirmed.body.amount_cents, proposed.body.amount_cents);
+    assert.equal(confirmed.body.total_amount, proposed.body.total_amount);
+    assert.equal(bizContent(confirmed.body.page_redirection_data).total_amount, proposed.body.total_amount);
+  } finally {
+    await app.close();
+  }
+});
+
+test("purchase before plan confirmation does not return page.pay", async () => {
+  const app = await start();
+  try {
+    await boot(app.base);
+    const token = await issue(app.base);
+    const proposed = await propose(app.base, token.token, "会议室缺笔和 A4 纸，下周开会用");
+    assert.equal(proposed.body.confirmable, true);
+    const direct = await purchase(
+      app.base,
+      token.token,
+      proposed.body.lines.map((line: { sku_id: string; quantity: number }) => ({
+        sku_id: line.sku_id,
+        quantity: line.quantity,
+      })),
+    );
+    assert.equal(direct.status, 409);
+    assert.equal(direct.body.error, "plan_not_confirmed");
+    assert.equal(direct.body.page_redirection_data, undefined);
+    const stored = await api(app.base, `/payment-tokens/${encodeURIComponent(token.token)}`);
+    assert.equal(stored.body.used, false);
+    const confirmed = await api(app.base, `/agent/plans/${proposed.body.plan_id}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ token: token.token }),
+    });
+    assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body));
+    assert.equal(confirmed.body.amount_cents, proposed.body.amount_cents);
+    assert.equal(typeof confirmed.body.page_redirection_data, "string");
+  } finally {
+    await app.close();
+  }
+});
+
+test("over-budget plan is not rewritten into a cheaper order", async () => {
+  const app = await start();
+  try {
+    await boot(app.base);
+    const token = await issue(app.base);
+    const proposed = await propose(app.base, token.token, "100支笔");
+    assert.equal(proposed.status, 200, JSON.stringify(proposed.body));
+    assert.equal(proposed.body.confirmable, false);
+    assert.equal(proposed.body.deny_reason, "over_budget");
+    assert.equal(proposed.body.page_redirection_data, undefined);
+    assert.equal(proposed.body.lines.length, 1);
+    assert.equal(proposed.body.lines[0].sku_id, "sku-pen");
+    assert.equal(proposed.body.lines[0].quantity, 100);
+    assert.equal(proposed.body.lines[0].unit_price_cents, 800);
+    assert.equal(JSON.stringify(proposed.body).includes("sku-pen-cent"), false);
+    const confirmed = await api(app.base, `/agent/plans/${proposed.body.plan_id}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ token: token.token }),
+    });
+    assert.equal(confirmed.status, 403);
+    assert.equal(confirmed.body.deny_reason, "over_budget");
+    assert.equal(confirmed.body.page_redirection_data, undefined);
+    assert.equal(confirmed.body.lines[0].quantity, 100);
+    const stored = await api(app.base, `/payment-tokens/${encodeURIComponent(token.token)}`);
+    assert.equal(stored.body.used, false);
+  } finally {
+    await app.close();
+  }
+});
+
 test("sandbox config maps the Node.js PKCS#1 field and refuses a non-sandbox gateway", () => {
   const parsed = parseSandboxConfig({
     appIds: [

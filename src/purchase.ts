@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import { findSku } from "./catalog.js";
+import { interpretRequest } from "./intent.js";
 import { AgentPayDatabase, type StoredOrder } from "./db.js";
 import { createProductPayClient } from "./alipay-client.js";
 import { DenyError, HttpError } from "./errors.js";
@@ -122,6 +123,9 @@ export interface PurchaseApp {
   issueToken(): TokenRecord;
   getToken(token: string): TokenRecord;
   createCashier(command: PayCommand, baseUrl: string): CashierBody;
+  propose(input: { token: string; text: string }): { status: number; body: Record<string, unknown> };
+  confirmPlan(planId: string, token: string, baseUrl: string): CashierBody & { plan_id: string };
+  hasOpenPlan(token: string): boolean;
   confirmTrade(outTradeNo: string, baseUrl: string): Promise<ConfirmBody>;
   applyNotify(fields: Record<string, string>, baseUrl: string): Promise<"success" | "failure">;
   listDrafts(): ExpenseDraft[];
@@ -190,21 +194,9 @@ export function createPurchaseApp(options: {
     database.appendAudit({ at: clock.now().toISOString(), action, principal, detail });
   }
 
-  function pricedOrder(command: PayCommand, authorization: Authorization, scopeVersion: number): {
-    lines: OrderLine[];
-    amountCents: number;
-    amount: string;
-    subject: string;
-    goodsName: string;
-  } {
-    if (command.merchant_id !== MERCHANT_ID || !authorization.merchant_whitelist.includes(command.merchant_id)) {
-      throw new DenyError("merchant_not_allowed", `Merchant ${command.merchant_id} is not allowed`, {
-        merchant_id: command.merchant_id,
-        merchant_whitelist: [...authorization.merchant_whitelist],
-      });
-    }
+  function buildLines(items: PayCommand["items"], authorization: Authorization): OrderLine[] {
     const lines: OrderLine[] = [];
-    for (const item of command.items) {
+    for (const item of items) {
       const sku = findSku(item.sku_id);
       if (!sku) {
         throw new DenyError("sku_not_allowed", `SKU ${item.sku_id} is not an allowed stationery item`, {
@@ -230,6 +222,23 @@ export function createPurchaseApp(options: {
         line_cents: lineCents,
       });
     }
+    return lines;
+  }
+
+  function pricedOrder(command: PayCommand, authorization: Authorization, scopeVersion: number): {
+    lines: OrderLine[];
+    amountCents: number;
+    amount: string;
+    subject: string;
+    goodsName: string;
+  } {
+    if (command.merchant_id !== MERCHANT_ID || !authorization.merchant_whitelist.includes(command.merchant_id)) {
+      throw new DenyError("merchant_not_allowed", `Merchant ${command.merchant_id} is not allowed`, {
+        merchant_id: command.merchant_id,
+        merchant_whitelist: [...authorization.merchant_whitelist],
+      });
+    }
+    const lines = buildLines(command.items, authorization);
     const amountCents = lines.reduce((sum, line) => sum + line.line_cents, 0);
     if (!Number.isSafeInteger(amountCents) || amountCents < 1) {
       throw new HttpError(400, "invalid_amount", "Order amount must be at least 1 cent");
@@ -372,6 +381,43 @@ export function createPurchaseApp(options: {
       request_fingerprint: order.requestFingerprint,
       receipt_callback: fulfilled.draft,
     };
+  }
+
+  interface StoredPlan {
+    planId: string;
+    token: string;
+    items: PayCommand["items"];
+    lines: OrderLine[];
+    amountCents: number;
+    scopeVersion: number;
+    confirmationId: string;
+    confirmable: boolean;
+    status: "open" | "confirmed";
+  }
+
+  const plans = new Map<string, StoredPlan>();
+
+  function budgetView(authorization: Authorization, scopeVersion: number) {
+    const spent = database.spentCents(clock.now(), scopeVersion);
+    return {
+      per_order_cents: authorization.budget.per_order_cents,
+      daily_cents: authorization.budget.daily_cents,
+      total_cents: authorization.budget.total_cents,
+      spent_daily_cents: spent.daily,
+      spent_total_cents: spent.total,
+      remaining_daily_cents: authorization.budget.daily_cents - spent.daily,
+      remaining_total_cents: authorization.budget.total_cents - spent.total,
+    };
+  }
+
+  function overBudget(amountCents: number, authorization: Authorization, scopeVersion: number): boolean {
+    const spent = database.spentCents(clock.now(), scopeVersion);
+    const { budget } = authorization;
+    return (
+      amountCents > budget.per_order_cents ||
+      spent.daily + amountCents > budget.daily_cents ||
+      spent.total + amountCents > budget.total_cents
+    );
   }
 
   const app: PurchaseApp = {
@@ -618,6 +664,151 @@ export function createPurchaseApp(options: {
       if (!draft) throw new HttpError(404, "draft_not_found", "Expense draft was not found");
       return draft;
     },
+    propose({ token, text }) {
+      const current = database.getAuthorization();
+      if (!current.authorized || !current.authorization) {
+        throw new HttpError(403, "authorization_required", "Set budget, merchant whitelist, and validity before paying");
+      }
+      const record = database.getToken(token);
+      if (!record) throw new HttpError(404, "token_not_found", "Payment token was not issued");
+      const now = clock.now();
+      if (now.getTime() >= Date.parse(record.expires_at)) {
+        throw new DenyError("expired", `Payment token expired at ${record.expires_at}`, {
+          expires_at: record.expires_at,
+          now: now.toISOString(),
+        });
+      }
+      assertInsideWindow(now, current.authorization, "Payment");
+      if (record.used) {
+        throw new DenyError("token_reused", "Payment token is single-use and has already been consumed");
+      }
+      const confirmation = activeConfirmation(database, current.scopeVersion);
+      if (
+        !confirmation ||
+        record.scope_version !== current.scopeVersion ||
+        record.confirmation_id !== confirmation.confirmation_id
+      ) {
+        throw new HttpError(403, "authorization_superseded", "The user confirmation for this token is no longer active");
+      }
+      if (!current.authorization.merchant_whitelist.includes(MERCHANT_ID)) {
+        throw new DenyError("merchant_not_allowed", `Merchant ${MERCHANT_ID} is not allowed`, {
+          merchant_id: MERCHANT_ID,
+          merchant_whitelist: [...current.authorization.merchant_whitelist],
+        });
+      }
+      const interpreted = interpretRequest(text, current.authorization.sku_keywords);
+      if (interpreted.kind === "clarify") {
+        return {
+          status: 422,
+          body: {
+            ok: false,
+            error: "needs_clarification",
+            message: interpreted.questions[0],
+            questions: interpreted.questions,
+          },
+        };
+      }
+      if (interpreted.kind === "reject") {
+        return {
+          status: 422,
+          body: {
+            ok: false,
+            error: "not_purchasable",
+            message: interpreted.rejected[0]?.message ?? "买不了",
+            rejected: interpreted.rejected,
+          },
+        };
+      }
+      const lines = buildLines(interpreted.items, current.authorization);
+      const amountCents = lines.reduce((sum, line) => sum + line.line_cents, 0);
+      if (!Number.isSafeInteger(amountCents) || amountCents < 1) {
+        throw new HttpError(400, "invalid_amount", "Order amount must be at least 1 cent");
+      }
+      for (const [planId, plan] of plans) {
+        if (plan.token === token && plan.status === "open") plans.delete(planId);
+      }
+      const blocked = overBudget(amountCents, current.authorization, current.scopeVersion);
+      const plan: StoredPlan = {
+        planId: createId("plan"),
+        token,
+        items: lines.map((line) => ({ sku_id: line.sku_id, quantity: line.quantity })),
+        lines,
+        amountCents,
+        scopeVersion: current.scopeVersion,
+        confirmationId: confirmation.confirmation_id,
+        confirmable: !blocked,
+        status: "open",
+      };
+      plans.set(plan.planId, plan);
+      audit("plan_proposed", confirmation.principal, {
+        plan_id: plan.planId,
+        amount_cents: amountCents,
+        confirmable: plan.confirmable,
+        sku_ids: plan.items.map((item) => item.sku_id),
+      });
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          plan_id: plan.planId,
+          confirmable: plan.confirmable,
+          ...(blocked
+            ? {
+                deny_reason: "over_budget",
+                message: "超出预算。方案保持原数量和目录价，不会改成更便宜的商品，也不会减少数量后再提交。",
+              }
+            : {}),
+          lines,
+          amount_cents: amountCents,
+          total_amount: centsToAmount(amountCents),
+          budget: budgetView(current.authorization, current.scopeVersion),
+        },
+      };
+    },
+    confirmPlan(planId, token, baseUrl) {
+      const plan = plans.get(planId);
+      if (!plan) throw new HttpError(404, "plan_not_found", "Plan was not found");
+      if (plan.token !== token) throw new HttpError(403, "plan_token_mismatch", "Plan does not belong to this payment token");
+      if (plan.status === "confirmed") {
+        throw new HttpError(409, "plan_already_confirmed", "This plan was already confirmed");
+      }
+      if (!plan.confirmable) {
+        throw new DenyError(
+          "over_budget",
+          "Order exceeds the budget. The plan was not replaced with a cheaper or smaller order.",
+          { amount_cents: plan.amountCents, lines: plan.lines },
+        );
+      }
+      const current = database.getAuthorization();
+      const confirmation = activeConfirmation(database, current.scopeVersion);
+      if (
+        !confirmation ||
+        plan.scopeVersion !== current.scopeVersion ||
+        plan.confirmationId !== confirmation.confirmation_id
+      ) {
+        throw new HttpError(403, "authorization_superseded", "The user confirmation for this plan is no longer active");
+      }
+      const cashier = app.createCashier(
+        {
+          token,
+          merchant_id: MERCHANT_ID,
+          items: plan.items,
+          client_amount_cents: null,
+        },
+        baseUrl,
+      );
+      if (cashier.amount_cents !== plan.amountCents) {
+        throw new HttpError(500, "quote_mismatch", "Confirmed amount does not match the server quote");
+      }
+      plan.status = "confirmed";
+      return { ...cashier, plan_id: plan.planId };
+    },
+    hasOpenPlan(token) {
+      for (const plan of plans.values()) {
+        if (plan.token === token && plan.status === "open") return true;
+      }
+      return false;
+    },
     getOrder(outTradeNo) {
       const order = database.findOrder(outTradeNo);
       if (!order || order.orderStatus !== "TRADE_SUCCESS") {
@@ -626,6 +817,7 @@ export function createPurchaseApp(options: {
       return order;
     },
     reset() {
+      plans.clear();
       database.reset();
       clock.reset();
     },
