@@ -110,12 +110,13 @@ export interface PurchaseApp {
   authorizationView(): {
     authorized: boolean;
     scope_version: number;
+    principal: string;
     authorization: Authorization | null;
     confirmation: UserConfirmation | null;
     defaults: Authorization;
   };
   setAuthorization(authorization: Authorization): { authorization: Authorization; scope_version: number };
-  confirmAuthorization(principal: string): UserConfirmation;
+  confirmAuthorization(): UserConfirmation;
   revokeAuthorization(): UserConfirmation;
   listAudit(): AuditEvent[];
   issueToken(): TokenRecord;
@@ -162,7 +163,9 @@ export function createPurchaseApp(options: {
   databasePath: string;
   config: SandboxConfig | null;
   productPay?: ProductPayClient | null;
+  demoPrincipal: string;
 }): PurchaseApp {
+  const demoPrincipal = options.demoPrincipal;
   const clock = new SandboxClock();
   const database = new AgentPayDatabase(options.databasePath);
   const config = options.config;
@@ -374,6 +377,7 @@ export function createPurchaseApp(options: {
       return {
         authorized: current.authorized,
         scope_version: current.scopeVersion,
+        principal: demoPrincipal,
         authorization: current.authorization,
         confirmation: database.getConfirmation(),
         defaults: structuredClone(DEFAULT_AUTHORIZATION),
@@ -384,13 +388,14 @@ export function createPurchaseApp(options: {
       audit("authorization_saved", null, { scope_version: scopeVersion });
       return { authorization: structuredClone(authorization), scope_version: scopeVersion };
     },
-    confirmAuthorization(principal) {
+    confirmAuthorization() {
       const current = database.getAuthorization();
       if (!current.authorized || !current.authorization) {
         throw new HttpError(403, "authorization_required", "Save an authorization scope before the user confirms it");
       }
       const now = clock.now();
       assertInsideWindow(now, current.authorization, "User confirmation");
+      const principal = demoPrincipal;
       const confirmation: UserConfirmation = {
         confirmation_id: createId("confirm"),
         principal,

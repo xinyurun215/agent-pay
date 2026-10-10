@@ -15,6 +15,7 @@ const { server } = createApp({
   config: loadSandboxConfig(path.resolve(".alipay-sandbox.json")),
   adminToken: process.env.ADMIN_TOKEN ?? "",
   userToken: process.env.USER_TOKEN ?? "",
+  demoPrincipal: process.env.DEMO_PRINCIPAL,
 });
 server.listen(port, host, () => {
   console.log(`Agent Pay sandbox listening on http://${host}:${port}`);

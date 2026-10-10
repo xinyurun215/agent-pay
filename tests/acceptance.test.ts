@@ -11,6 +11,7 @@ import { AlipaySdk } from "alipay-sdk";
 import type { ProductPayClient } from "../src/product-pay.js";
 import { createApp, type App } from "../src/server.js";
 import { parseSandboxConfig, SANDBOX_GATEWAY, type SandboxConfig } from "../src/sandbox-config.js";
+import { DEFAULT_DEMO_PRINCIPAL, resolveDemoPrincipal } from "../src/principal.js";
 import { DENY_REASONS, MERCHANT_ID } from "../src/types.js";
 
 /**
@@ -49,7 +50,7 @@ class ScriptedTradeQuery {
 const SAMPLE_NOW = "2026-10-09T10:00:00+08:00";
 const ADMIN_TOKEN = "test-admin-token";
 const USER_TOKEN = "test-user-token";
-const PRINCIPAL = "office-user-demo";
+const PRINCIPAL = DEFAULT_DEMO_PRINCIPAL;
 
 const DEFAULT_AUTH = {
   budget: { per_order_cents: 50_000, daily_cents: 200_000, total_cents: 500_000 },
@@ -102,9 +103,13 @@ function testClient(config: SandboxConfig, script: ScriptedTradeQuery): ProductP
   };
 }
 
-async function start(script = new ScriptedTradeQuery()): Promise<{
+async function start(
+  script = new ScriptedTradeQuery(),
+  demoPrincipal = PRINCIPAL,
+): Promise<{
   base: string;
   script: ScriptedTradeQuery;
+  principal: string;
   close: () => Promise<void>;
 }> {
   const config = testConfig();
@@ -115,6 +120,7 @@ async function start(script = new ScriptedTradeQuery()): Promise<{
     productPay: testClient(config, script),
     adminToken: ADMIN_TOKEN,
     userToken: USER_TOKEN,
+    demoPrincipal,
   });
   await new Promise<void>((resolve) => {
     app.server.listen(0, "127.0.0.1", () => resolve());
@@ -124,6 +130,7 @@ async function start(script = new ScriptedTradeQuery()): Promise<{
   return {
     base: `http://127.0.0.1:${address.port}`,
     script,
+    principal: demoPrincipal,
     close: () => closeServer(app.server, app),
   };
 }
@@ -167,7 +174,11 @@ function bizContent(pageRedirectionData: string): Record<string, any> {
   return JSON.parse(parsed.searchParams.get("biz_content") ?? "{}") as Record<string, any>;
 }
 
-async function boot(base: string, authorization: Record<string, unknown> = DEFAULT_AUTH): Promise<void> {
+async function boot(
+  base: string,
+  authorization: Record<string, unknown> = DEFAULT_AUTH,
+  principal = PRINCIPAL,
+): Promise<void> {
   const clock = await api(base, "/sandbox/clock", {
     method: "POST",
     body: JSON.stringify({ now: SAMPLE_NOW }),
@@ -180,10 +191,10 @@ async function boot(base: string, authorization: Record<string, unknown> = DEFAU
   assert.equal(saved.status, 200);
   const confirmed = await api(base, "/authorization/confirm", {
     method: "POST",
-    body: JSON.stringify({ principal: PRINCIPAL }),
+    body: JSON.stringify({}),
   });
   assert.equal(confirmed.status, 200);
-  assert.equal(confirmed.body.confirmation.principal, PRINCIPAL);
+  assert.equal(confirmed.body.confirmation.principal, principal);
   assert.equal(confirmed.body.confirmation.revocable, true);
   assert.equal(confirmed.body.confirmation.revoked_at, null);
 }
@@ -260,7 +271,7 @@ test("token requires a saved scope and a user confirmation, not only the admin t
     const adminOnly = await api(
       app.base,
       "/authorization/confirm",
-      { method: "POST", body: JSON.stringify({ principal: PRINCIPAL }) },
+      { method: "POST", body: JSON.stringify({}) },
       { user: false },
     );
     assert.equal(adminOnly.status, 401);
@@ -268,8 +279,9 @@ test("token requires a saved scope and a user confirmation, not only the admin t
 
     const confirmed = await api(app.base, "/authorization/confirm", {
       method: "POST",
-      body: JSON.stringify({ principal: PRINCIPAL }),
+      body: JSON.stringify({}),
     });
+    assert.equal(confirmed.body.confirmation.principal, PRINCIPAL);
     assert.equal(confirmed.body.confirmation.scope_version, saved.body.scope_version);
     assert.equal(confirmed.body.confirmation.scope.category, "desktop_stationery");
     assert.ok(confirmed.body.confirmation.confirmed_at);
@@ -283,6 +295,64 @@ test("token requires a saved scope and a user confirmation, not only the admin t
     assert.ok(actions.includes("authorization_saved"));
     assert.ok(actions.includes("user_confirmed"));
     assert.ok(actions.includes("token_issued"));
+    const confirmedEvent = audit.body.audit.find((event: { action: string }) => event.action === "user_confirmed");
+    assert.equal(confirmedEvent.principal, PRINCIPAL);
+  } finally {
+    await app.close();
+  }
+});
+
+test("DEMO_PRINCIPAL defaults when unset and rejects an overlong value", () => {
+  assert.equal(resolveDemoPrincipal(undefined), DEFAULT_DEMO_PRINCIPAL);
+  assert.equal(resolveDemoPrincipal("   "), DEFAULT_DEMO_PRINCIPAL);
+  assert.equal(resolveDemoPrincipal(" demo:office "), "demo:office");
+  assert.throws(() => resolveDemoPrincipal("x".repeat(121)), /DEMO_PRINCIPAL/);
+});
+
+test("confirm binds DEMO_PRINCIPAL and rejects a client principal", async () => {
+  const script = new ScriptedTradeQuery();
+  const app = await start(script, "demo:bound-office");
+  try {
+    const defaults = await api(app.base, "/authorization/defaults", undefined, { admin: false, user: false });
+    assert.equal(defaults.body.principal, "demo:bound-office");
+
+    await api(app.base, "/sandbox/clock", {
+      method: "POST",
+      body: JSON.stringify({ now: SAMPLE_NOW }),
+    });
+    await api(app.base, "/authorization", {
+      method: "PUT",
+      body: JSON.stringify(DEFAULT_AUTH),
+    });
+
+    const rejected = await api(app.base, "/authorization/confirm", {
+      method: "POST",
+      body: JSON.stringify({ principal: "office-user-demo" }),
+    });
+    assert.equal(rejected.status, 400);
+    assert.equal(rejected.body.error, "principal_not_accepted");
+    assert.equal((await api(app.base, "/authorization")).body.confirmation, null);
+
+    const adminWithPrincipal = await api(
+      app.base,
+      "/authorization/confirm",
+      { method: "POST", body: JSON.stringify({ principal: "office-user-demo" }) },
+      { user: false },
+    );
+    assert.equal(adminWithPrincipal.status, 401);
+    assert.equal(adminWithPrincipal.body.error, "user_unauthorized");
+
+    await boot(app.base, DEFAULT_AUTH, app.principal);
+    const token = await issue(app.base);
+    const cashier = await purchase(app.base, token.token, [{ sku_id: "sku-pen-cent", quantity: 1 }]);
+    assert.equal(cashier.status, 200);
+    assert.equal(cashier.body.principal, "demo:bound-office");
+
+    const audit = await api(app.base, "/authorization/audit");
+    for (const event of audit.body.audit) {
+      if (event.action === "authorization_saved") continue;
+      assert.equal(event.principal, "demo:bound-office");
+    }
   } finally {
     await app.close();
   }

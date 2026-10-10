@@ -8,7 +8,8 @@ import { fileURLToPath } from "node:url";
 import { createProductPayClient } from "./alipay-client.js";
 import { catalogView } from "./catalog.js";
 import { DenyError, HttpError } from "./errors.js";
-import { parseAuthorization, parseClock, parsePayCommand, parsePrincipal } from "./parse.js";
+import { parseAuthorization, parseClock, parsePayCommand } from "./parse.js";
+import { rejectClientPrincipal, resolveDemoPrincipal } from "./principal.js";
 import type { ProductPayClient } from "./product-pay.js";
 import { createPurchaseApp, type PurchaseApp } from "./purchase.js";
 import { renderReceipt } from "./receipt.js";
@@ -112,10 +113,15 @@ export function createApp(options: {
   productPay?: ProductPayClient | null;
   adminToken: string;
   userToken: string;
+  /** When omitted, read DEMO_PRINCIPAL or use demo:office-user. */
+  demoPrincipal?: string;
 }): App {
   if (options.adminToken && options.userToken && options.adminToken === options.userToken) {
     throw new Error("USER_TOKEN must be different from ADMIN_TOKEN");
   }
+  const demoPrincipal = resolveDemoPrincipal(
+    options.demoPrincipal === undefined ? process.env.DEMO_PRINCIPAL : options.demoPrincipal,
+  );
   const productPay =
     options.productPay === undefined
       ? options.config
@@ -126,6 +132,7 @@ export function createApp(options: {
     databasePath: options.databasePath,
     config: options.config,
     productPay,
+    demoPrincipal,
   });
 
   function requireAdmin(req: IncomingMessage): void {
@@ -189,7 +196,8 @@ export function createApp(options: {
     }
 
     if (method === "GET" && pathname === "/authorization/defaults") {
-      sendJson(res, 200, { ok: true, defaults: purchase.authorizationView().defaults });
+      const view = purchase.authorizationView();
+      sendJson(res, 200, { ok: true, principal: view.principal, defaults: view.defaults });
       return;
     }
 
@@ -216,7 +224,8 @@ export function createApp(options: {
     if (method === "POST" && pathname === "/authorization/confirm") {
       const body = parseJsonBody(await readRaw(req));
       requireUser(req);
-      const confirmation = purchase.confirmAuthorization(parsePrincipal(body));
+      rejectClientPrincipal(body);
+      const confirmation = purchase.confirmAuthorization();
       sendJson(res, 200, { ok: true, confirmation });
       return;
     }

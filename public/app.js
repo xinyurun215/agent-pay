@@ -111,6 +111,10 @@ async function refreshClock() {
 async function refreshAuth() {
   const defaults = await api("/authorization/defaults");
   fillAuthorization(defaults.body.defaults);
+  const principalView = document.querySelector("#principal-view");
+  if (defaults.body.principal) {
+    principalView.textContent = `授权主体由服务端绑定为 ${defaults.body.principal}（已登录的 USER_TOKEN → DEMO_PRINCIPAL）。确认请求不能提交 principal。`;
+  }
   if (!adminTokenEl.value.trim()) {
     authStateEl.textContent = "填入管理令牌后可读取已保存策略。用户确认需要另一个用户令牌。";
     return;
@@ -227,7 +231,7 @@ async function issueToken() {
 async function confirmUser() {
   const { status, body } = await api("/authorization/confirm", {
     method: "POST",
-    body: JSON.stringify({ principal: document.querySelector("#principal").value.trim() }),
+    body: JSON.stringify({}),
   });
   show(body, status);
   await refreshAuth();

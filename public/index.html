@@ -33,9 +33,7 @@
             <input id="user-token" type="password" autocomplete="off" placeholder="USER_TOKEN" />
           </label>
         </div>
-        <label style="margin-bottom: 0.6rem">授权主体 principal
-          <input id="principal" value="office-user-demo" autocomplete="off" />
-        </label>
+        <p id="principal-view" class="hint">授权主体由服务端按 USER_TOKEN 绑定，默认 demo:office-user。确认请求不能填写 principal。</p>
         <div class="grid">
           <label>单笔上限（分） per_order_cents
             <input id="per-order" name="per_order_cents" type="number" min="0" step="1" required />
