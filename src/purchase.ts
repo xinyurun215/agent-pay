@@ -582,7 +582,10 @@ export function createPurchaseApp(options: {
       try {
         await settle(order, baseUrl, fields, false);
         return "success";
-      } catch {
+      } catch (error) {
+        if (error instanceof HttpError && error.code === "authorization_changed") {
+          return "success";
+        }
         return "failure";
       }
     },

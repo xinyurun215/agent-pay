@@ -7,9 +7,11 @@ This demo is **商品 Agent Pay** (办公智能体支付) on the PC merchant pat
 - https://aipay.alipay.com/docs/agent-pay/skillpay.html
 - https://aipay.alipay.com/products/office-agent-pay.md
 
-Checkout calls `alipay.trade.page.pay` (`product_code=FAST_INSTANT_TRADE_PAY`) through `alipay-sdk` `pageExecute` GET. The response body is `pageRedirectionData`, the cashier URL. Shorten it with `alipay-bot trigger-payment-signal`, then the user pays with `alipay-bot submit-payment`. This service does not pay on the user's behalf.
+Checkout calls `alipay.trade.page.pay` (`product_code=FAST_INSTANT_TRADE_PAY`) through `alipay-sdk` `pageExecute` GET. The response body is `pageRedirectionData`, a sandbox cashier URL. The official next commands are `alipay-bot trigger-payment-signal` and `alipay-bot submit-payment`. This service does not run those commands and does not pay on the user's behalf.
 
-After Alipay reports `TRADE_SUCCESS` or `TRADE_FINISHED`, `alipay.trade.query` (or the signed async notify) must match the stored order amount and `out_trade_no`. The expense draft is written only then.
+What this repo has verified is the signed cashier URL, plus local tests that simulate `alipay.trade.query` and the async notify. `alipay-bot submit-payment` has not been run, so there is no completed sandbox payment and no expense draft produced by a live Alipay trade.
+
+When a matching paid proof is supplied, `alipay.trade.query` or a signed notify must match the stored order amount and `out_trade_no` before an expense draft is written. A signed notify for an unpaid order whose authorization later changed is answered `success` and still writes no draft.
 
 Sandbox only. A non-sandbox gateway is refused.
 
@@ -82,7 +84,7 @@ npm test
 npm run typecheck
 ```
 
-`npm test` does not call Alipay and does not run `alipay-bot`. Page-pay URLs are produced by the real `alipay-sdk` `pageExecute` with an ephemeral key. `alipay.trade.query` and notify signature checks go through a class marked `TEST DOUBLE` in `tests/acceptance.test.ts`. The demo process does not use that class.
+`npm test` does not call Alipay and does not run `alipay-bot`. Page-pay URLs are produced by the real `alipay-sdk` `pageExecute` with an ephemeral key. `alipay.trade.query` and notify signature checks go through a class marked `TEST DOUBLE` in `tests/acceptance.test.ts`. That double is not a completed payment. The demo process does not use that class.
 
 ## Catalog
 
@@ -131,7 +133,7 @@ Before the policy is saved, token issuance returns `403` `authorization_required
 
 The purchase response is HTTP 200. For one `sku-pen`, `total_amount` is `8.00` and `amount_cents` is `800`, not a client-supplied `1`. For one `sku-pen-cent`, `total_amount` is `0.01`. `page_redirection_data` is the cashier URL (`method=alipay.trade.page.pay`). A second purchase with the same token returns `token_reused`. No expense draft exists yet.
 
-Hand the URL to the official bot. Do not pay from this server:
+The official handoff, not executed in this repository's verification, is:
 
 ```bash
 alipay-bot trigger-payment-signal \
@@ -144,15 +146,15 @@ alipay-bot submit-payment \
   --intent-summary "<文具演示商户，商品名称，金额（元）>"
 ```
 
-Then ask this server to read the sandbox trade. The query amount and `out_trade_no` must match the original order. A repeat confirm returns the same draft.
+`POST /agent/orders/<out_trade_no>/confirm` then calls `alipay.trade.query`. A draft is written only when that response, or a signed notify, reports a matching paid trade. Automated tests stub that response. They do not pay at the sandbox cashier. A second confirm of a draft that was already written returns the same draft.
 
 ```bash
 curl -s -X POST $BASE/agent/orders/<out_trade_no>/confirm -H "$AUTH"
 ```
 
-`GET /expense-drafts` then contains `order_id`, `amount_cents`, `paid_at`, `merchant_name`, `receipt_url`, and `expense_draft_id`. If Alipay can reach this process, it can also POST `application/x-www-form-urlencoded` to `/alipay/notify`. The body is accepted only when `alipay-sdk` `checkNotifySign` succeeds.
+If a live paid trade has been queried, `GET /expense-drafts` contains `order_id`, `amount_cents`, `paid_at`, `merchant_name`, `receipt_url`, and `expense_draft_id`. If Alipay can reach this process, it can also POST `application/x-www-form-urlencoded` to `/alipay/notify`. The body is accepted only when `alipay-sdk` `checkNotifySign` succeeds.
 
-Saving the policy again bumps `scope_version`, revokes the confirmation, and makes the old unpaid order return `409` `authorization_changed`.
+Saving the policy again bumps `scope_version`, revokes the confirmation, and makes `POST /agent/orders/:id/confirm` return `409` `authorization_changed` for the old unpaid order. A signed async notify for that same order returns the plain text `success` and does not write a draft.
 
 ## Demo: deny reasons
 
@@ -222,7 +224,7 @@ Unknown `sku_id` values return the same code.
 | `GET` | `/payment-tokens/:token` | Token status. Admin bearer |
 | `POST` | `/agent/purchase` | Create the `page.pay` cashier URL |
 | `POST` | `/agent/orders/:id/confirm` | `alipay.trade.query`, then the expense draft. Admin bearer |
-| `POST` | `/alipay/notify` | Signed Alipay notify. Responds `success` or `failure` |
+| `POST` | `/alipay/notify` | Signed Alipay notify. `success` after fulfill, on a repeat, or when the unpaid order's authorization changed. `failure` otherwise. No draft in the changed-authorization case |
 | `GET` | `/orders/:orderId` | Fulfilled order. Admin bearer |
 | `GET` | `/expense-drafts` | Receipt callbacks. Admin bearer |
 | `GET` | `/expense-drafts/:id` | One draft. Admin bearer |
@@ -237,9 +239,14 @@ Denied purchases respond with HTTP 403:
 { "ok": false, "deny_reason": "over_budget", "message": "..." }
 ```
 
-## Gaps
+## What was verified
 
-- The mobile path `alipay.trade.order.prepay` / `prepayId` is documented by Alipay for APP merchants and is not wired here. This demo is the PC `page.pay` path.
-- `alipay-bot submit-payment` is intentionally not invoked by the server. A local process cannot receive the sandbox buyer's cashier completion unless you run the bot yourself.
-- Async notify reaches `/alipay/notify` only when that URL is reachable from Alipay. Otherwise use `POST /agent/orders/:id/confirm`.
-- A notify for an order whose authorization was changed returns `failure` and does not write a draft. Alipay may retry that notify.
+- Local `pageExecute` cashier URL for `alipay.trade.page.pay`, including `sku-pen-cent` at `0.01` CNY. The browser demo showed that URL. It did not open the cashier.
+- User confirmation, the five deny reasons, and admin bearer checks.
+- Simulated `alipay.trade.query` and notify inside `npm test`. The trade payload comes from a test double.
+
+## Not verified
+
+- `alipay-bot trigger-payment-signal` and `alipay-bot submit-payment` were not run. There is no completed real Agent Pay payment loop and no live Alipay expense draft.
+- APP `alipay.trade.order.prepay` is deferred and not wired.
+- A live notify delivery needs a URL Alipay can reach. After an authorization change, a signed notify for the old unpaid order is answered `success` and writes no draft.

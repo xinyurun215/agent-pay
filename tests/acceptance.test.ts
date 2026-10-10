@@ -15,8 +15,8 @@ import { DENY_REASONS, MERCHANT_ID } from "../src/types.js";
 
 /**
  * TEST DOUBLE for alipay.trade.query and notify signature checks.
- * src/index.ts never uses this class. The demo signs alipay.trade.page.pay with alipay-sdk
- * and leaves payment to `alipay-bot submit-payment`.
+ * src/index.ts never uses this class. The demo signs alipay.trade.page.pay with alipay-sdk.
+ * These tests do not call Alipay and do not run `alipay-bot submit-payment`.
  */
 class ScriptedTradeQuery {
   tradeNo = "";
@@ -476,6 +476,48 @@ test("notify with a valid test-double signature fulfills once; a bad signature d
     const drafts = await api(app.base, "/expense-drafts");
     assert.equal(drafts.body.expense_drafts.length, 1);
     assert.equal(drafts.body.expense_drafts[0].amount_cents, 1);
+  } finally {
+    await app.close();
+  }
+});
+
+test("notify after an authorization change acks success and does not write a draft", async () => {
+  const script = new ScriptedTradeQuery();
+  const app = await start(script);
+  try {
+    await boot(app.base);
+    const token = await issue(app.base);
+    const cashier = await purchase(app.base, token.token, [{ sku_id: "sku-pen", quantity: 1 }]);
+    script.outTradeNo = cashier.body.out_trade_no;
+    script.amount = cashier.body.total_amount;
+    script.tradeNo = "2026100900000099";
+    script.acceptNotify = true;
+    await api(app.base, "/authorization", {
+      method: "PUT",
+      body: JSON.stringify({
+        ...DEFAULT_AUTH,
+        budget: { per_order_cents: 40_000, daily_cents: 200_000, total_cents: 500_000 },
+      }),
+    });
+    const form = new URLSearchParams({
+      out_trade_no: script.outTradeNo,
+      trade_no: script.tradeNo,
+      total_amount: script.amount,
+      trade_status: "TRADE_SUCCESS",
+    });
+    const notify = () =>
+      fetch(`${app.base}/alipay/notify`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: form,
+      });
+    assert.equal(await (await notify()).text(), "success");
+    assert.equal(await (await notify()).text(), "success");
+    assert.equal((await api(app.base, "/expense-drafts")).body.expense_drafts.length, 0);
+    const queried = await api(app.base, `/agent/orders/${cashier.body.out_trade_no}/confirm`, { method: "POST" });
+    assert.equal(queried.status, 409);
+    assert.equal(queried.body.error, "authorization_changed");
+    assert.equal((await api(app.base, "/expense-drafts")).body.expense_drafts.length, 0);
   } finally {
     await app.close();
   }
