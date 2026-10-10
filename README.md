@@ -151,11 +151,26 @@ Before the policy is saved, token issuance returns `403` `authorization_required
 
 The purchase response is HTTP 200. For one `sku-pen`, `total_amount` is `8.00` and `amount_cents` is `800`, not a client-supplied `1`. For one `sku-pen-cent`, `total_amount` is `0.01`. `page_redirection_data` is the cashier URL (`method=alipay.trade.page.pay`). A second purchase with the same token returns `token_reused`. No expense draft exists yet.
 
-The official cashier handoff uses the original `page_redirection_data` as `--payment-link`. `--session-id` must be a UUID from `AIPAY_SESSION_ID`, or a framework conversation id that is already a UUID. The evidence script stops when neither exists. It does not invent `session-xxx` or a timestamp.
+The official cashier handoff is `submit-payment` with the original `page_redirection_data` as `--payment-link` and a real UUID `--session-id`. The flow is documented here:
+
+https://github.com/alipay/payment-skills/blob/main/alipay-payment-skill/references/cashier-payment.md
+
+Obtain the session before any payment command:
+
+1. Log in to the Alipay sandbox (the same sandbox setup that produced `.alipay-sandbox.json`).
+2. Copy the UUID session from that sandbox login, or from the current framework session list when that id is already a UUID. The cashier doc reads `AIPAY_SESSION_ID` first, then a real framework session id.
+3. Export it, then run the evidence script:
+
+```bash
+export AIPAY_SESSION_ID=<uuid-from-sandbox-login>
+ADMIN_TOKEN=... USER_TOKEN=... node scripts/sandbox-evidence.mjs
+```
+
+`session-xxx`, a timestamp, and a made-up UUID are not session ids. This repository does not create one. If neither `AIPAY_SESSION_ID` nor a framework conversation id is already a UUID, `scripts/sandbox-evidence.mjs` stops before `submit-payment`.
 
 ```bash
 alipay-bot submit-payment \
-  --session-id "<uuid>" \
+  --session-id "$AIPAY_SESSION_ID" \
   --payment-link "<page_redirection_data>" \
   --intent-summary "服务内容：<subject>，支付金额：¥<total_amount>，支付对象：文具演示商户"
 ```
@@ -191,11 +206,14 @@ A blocked run still writes `manifest.json` with `real_funds: false` and `blocked
 
 `artifacts/` is gitignored. The cashier file is a signed sandbox URL. Keep it local.
 
+Run it only after the sandbox login above has produced a real UUID:
+
 ```bash
-ADMIN_TOKEN=... USER_TOKEN=... AIPAY_SESSION_ID=<uuid> node scripts/sandbox-evidence.mjs
+export AIPAY_SESSION_ID=<uuid-from-sandbox-login>
+ADMIN_TOKEN=... USER_TOKEN=... node scripts/sandbox-evidence.mjs
 ```
 
-The server must already be listening, started with the same two tokens. The script refuses to continue when `ALIPAY_GATEWAY` is set to anything other than the sandbox gateway. A successful run would be sandbox cashier evidence for 1 fen. It would not be a production charge and it would not show that real funds moved. The run recorded for this revision wrote `artifacts/sandbox/20261010T033942Z/manifest.json` with `blocked: true` and `blocker: missing_session_id`. `submit-payment` was not started.
+The server must already be listening, started with the same two tokens. The script refuses to continue when `ALIPAY_GATEWAY` is set to anything other than the sandbox gateway. A finished run would be sandbox cashier evidence for 1 fen. It would not be a production charge and it would not show that real funds moved. The run recorded for this revision wrote `artifacts/sandbox/20261010T033942Z/manifest.json` with `blocked: true` and `blocker: missing_session_id`. `submit-payment` was not started. There is no paid trade and no expense draft from Alipay.
 
 ## Demo: deny reasons
 
@@ -282,12 +300,20 @@ Denied purchases respond with HTTP 403:
 
 ## What was verified
 
-- Local `pageExecute` cashier URL for `alipay.trade.page.pay`, including `sku-pen-cent` at `0.01` CNY. The browser demo showed that URL. It did not open the cashier.
-- User confirmation, the five deny reasons, and admin bearer checks.
-- Simulated `alipay.trade.query` and notify inside `npm test`. The trade payload comes from a test double.
+Code for these three items is in this branch:
+
+- Cashier path is `submit-payment` on the original `page.pay` URL, with a UUID `--session-id` and the official intent-summary. `query-payment-status` uses only a credential from that submit output.
+- Budget spent is read and the order is reserved in one SQLite write transaction.
+- `alipay-bot` is pinned (`@alipay/agent-payment@1.0.26`, CLI `0.4.5` linux-amd64 sha256) and the child process receives an allowlisted environment.
+
+Also verified locally: the signed `pageExecute` cashier URL for `sku-pen-cent` at `0.01` CNY, user confirmation, the five deny reasons, admin bearer checks, and simulated `alipay.trade.query` / notify inside `npm test`. Those tests use a test double. They are not an Alipay payment.
 
 ## Not verified
 
-- `scripts/sandbox-evidence.mjs` was run and stopped before `submit-payment`. `AIPAY_SESSION_ID` was unset, and the framework conversation id is not a UUID, so no session id was invented. The record is `artifacts/sandbox/20261010T033942Z/manifest.json` (`real_funds: false`, `blocked: true`). There is no sandbox payment evidence and no expense draft from Alipay. A later run that finishes would still be sandbox cashier evidence for 1 fen, not a real-fund deduction.
-- APP `alipay.trade.order.prepay` is deferred and not wired.
-- A live notify delivery needs a URL Alipay can reach. After an authorization change, a signed notify for the old unpaid order is answered `success` and writes no draft.
+Sandbox evidence is **blocked** on a missing valid `AIPAY_SESSION_ID`. The recorded run is `artifacts/sandbox/20261010T033942Z/manifest.json` (`real_funds: false`, `blocked: true`, `blocker: missing_session_id`).
+
+`submit-payment` was **not** completed. There is **no** paid-trade evidence and **no** expense draft from Alipay. This is not a completed payment.
+
+Log in to the Alipay sandbox, export the real UUID as `AIPAY_SESSION_ID`, and run `scripts/sandbox-evidence.mjs` again. Do not substitute `session-xxx`, a timestamp, or a made-up UUID.
+
+APP `alipay.trade.order.prepay` is deferred and not wired. A live notify delivery needs a URL Alipay can reach. After an authorization change, a signed notify for the old unpaid order is answered `success` and writes no draft.

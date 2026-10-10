@@ -2,9 +2,14 @@
 /**
  * Sandbox cashier evidence for one sku-pen-cent (0.01 CNY).
  *
- * Official cashier flow: submit-payment with the original page.pay URL,
- * a UUID session id, and the fixed intent-summary. query-payment-status
- * runs only when this submit-payment output includes a query credential.
+ * Official cashier flow (do not invent a session id):
+ *   https://github.com/alipay/payment-skills/blob/main/alipay-payment-skill/references/cashier-payment.md
+ *   1. Log in to the Alipay sandbox.
+ *   2. Copy the real UUID session from that login, or a framework session id that is already a UUID.
+ *   3. export AIPAY_SESSION_ID=<that-uuid>
+ *   4. Run this script. It calls submit-payment with the original page.pay URL and that --session-id.
+ * session-xxx, a timestamp, and a made-up UUID are refused.
+ * query-payment-status runs only when this submit-payment output includes a query credential.
  *
  * Sandbox gateway only. This does not target production and is not a
  * real-fund deduction. Signed cashier URLs stay in the artifact directory.
@@ -79,7 +84,7 @@ export function resolveSessionId(source = process.env) {
   const framework = source.CURSOR_CONVERSATION_ID?.trim() ?? "";
   if (UUID_PATTERN.test(framework)) return framework;
   throw new Error(
-    "No AIPAY_SESSION_ID UUID, and the framework conversation id is not a UUID. Stopping before submit-payment.",
+    "No AIPAY_SESSION_ID UUID. Log in to the Alipay sandbox, copy the real UUID session, export AIPAY_SESSION_ID, then re-run. Stopping before submit-payment.",
   );
 }
 
