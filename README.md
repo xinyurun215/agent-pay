@@ -90,6 +90,14 @@ ADMIN_TOKEN=choose-an-admin-secret USER_TOKEN=choose-a-different-user-secret \
 
 `PUBLIC_BASE_URL` is required in this formal config. It must be a public `https` origin. Notify and return URLs are derived from it, not from the request `Host`. Alipay's async notify has to be able to reach that origin. `TRUST_PROXY=1` is only for a TLS terminator in front of that public origin.
 
+### 必填
+
+正式配置下：
+
+- `PUBLIC_BASE_URL` 必填。
+- 必须是公网 `https` origin。
+- 与 `LOCAL_DEGRADED=1` 互斥。设了本地降级就不能再设 `PUBLIC_BASE_URL`；设了 `PUBLIC_BASE_URL` 就不能再设 `LOCAL_DEGRADED=1`。
+
 `DEMO_PRINCIPAL` may be unset. The user token then binds to `demo:office-user`.
 
 Open the process URL and paste the two secrets into the page. The page keeps them in this tab's sessionStorage. The principal line is filled from the server. There is no principal input.
