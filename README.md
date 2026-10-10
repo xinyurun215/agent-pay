@@ -9,7 +9,7 @@ This demo is **商品 Agent Pay** (办公智能体支付) on the PC merchant pat
 
 Checkout calls `alipay.trade.page.pay` (`product_code=FAST_INSTANT_TRADE_PAY`) through `alipay-sdk` `pageExecute` GET. The response body is `pageRedirectionData`, a sandbox cashier URL. The official cashier command is `alipay-bot submit-payment` with that original URL, a UUID `--session-id`, and `--intent-summary`. `query-payment-status` is used only with a credential from that submit output. This service does not run those commands and does not pay on the user's behalf.
 
-What this repo has verified is the signed cashier URL, plus local tests that simulate `alipay.trade.query` and the async notify. `alipay-bot submit-payment` has not been run, so there is no completed sandbox payment and no expense draft produced by a live Alipay trade.
+What this repo has verified is the signed cashier URL, plus local tests that simulate `alipay.trade.query` and the async notify. The latest `scripts/sandbox-evidence.mjs` run stopped before `submit-payment` because no UUID session id was available. There is no completed sandbox payment and no expense draft produced by an Alipay trade.
 
 When a matching paid proof is supplied, `alipay.trade.query` or a signed notify must match the stored order amount and `out_trade_no` before an expense draft is written. A signed notify for an unpaid order whose authorization later changed is answered `success` and still writes no draft.
 
@@ -195,7 +195,7 @@ A blocked run still writes `manifest.json` with `real_funds: false` and `blocked
 ADMIN_TOKEN=... USER_TOKEN=... AIPAY_SESSION_ID=<uuid> node scripts/sandbox-evidence.mjs
 ```
 
-The server must already be listening, started with the same two tokens. The script refuses to continue when `ALIPAY_GATEWAY` is set to anything other than the sandbox gateway. A successful run is sandbox cashier evidence for 1 fen. It is not a production charge and it is not evidence that real funds moved. This repository's current verification has not run the script, so the default statement stands: `alipay-bot submit-payment` has not been run here.
+The server must already be listening, started with the same two tokens. The script refuses to continue when `ALIPAY_GATEWAY` is set to anything other than the sandbox gateway. A successful run would be sandbox cashier evidence for 1 fen. It would not be a production charge and it would not show that real funds moved. The run recorded for this revision wrote `artifacts/sandbox/20261010T033942Z/manifest.json` with `blocked: true` and `blocker: missing_session_id`. `submit-payment` was not started.
 
 ## Demo: deny reasons
 
@@ -288,6 +288,6 @@ Denied purchases respond with HTTP 403:
 
 ## Not verified
 
-- `scripts/sandbox-evidence.mjs` is the sandbox cashier path. Until that script records a completed `submit-payment`, there is no sandbox payment evidence and no expense draft produced by Alipay. A completed run would still be sandbox cashier evidence for 1 fen, not a real-fund deduction.
+- `scripts/sandbox-evidence.mjs` was run and stopped before `submit-payment`. `AIPAY_SESSION_ID` was unset, and the framework conversation id is not a UUID, so no session id was invented. The record is `artifacts/sandbox/20261010T033942Z/manifest.json` (`real_funds: false`, `blocked: true`). There is no sandbox payment evidence and no expense draft from Alipay. A later run that finishes would still be sandbox cashier evidence for 1 fen, not a real-fund deduction.
 - APP `alipay.trade.order.prepay` is deferred and not wired.
 - A live notify delivery needs a URL Alipay can reach. After an authorization change, a signed notify for the old unpaid order is answered `success` and writes no draft.
