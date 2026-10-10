@@ -1,0 +1,1021 @@
+import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
+import { mkdtempSync, readFileSync } from "node:fs";
+import type { Server } from "node:http";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import { AlipaySdk } from "alipay-sdk";
+
+import { AgentPayDatabase } from "../src/db.js";
+import { DenyError } from "../src/errors.js";
+import type { ProductPayClient } from "../src/product-pay.js";
+import { cashierIntentSummary } from "../src/purchase.js";
+import { createApp, resolvePublicBaseUrl, type App } from "../src/server.js";
+import { shanghaiDate } from "../src/time.js";
+import { botEnv, resolveSessionId } from "../scripts/sandbox-evidence.mjs";
+import { parseSandboxConfig, SANDBOX_GATEWAY, type SandboxConfig } from "../src/sandbox-config.js";
+import { DEFAULT_DEMO_PRINCIPAL, resolveDemoPrincipal } from "../src/principal.js";
+import { DENY_REASONS, MERCHANT_ID } from "../src/types.js";
+
+/**
+ * TEST DOUBLE for alipay.trade.query and notify signature checks.
+ * src/index.ts never uses this class. The demo signs alipay.trade.page.pay with alipay-sdk.
+ * These tests do not call Alipay and do not run `alipay-bot submit-payment`.
+ */
+class ScriptedTradeQuery {
+  tradeNo = "";
+  outTradeNo = "";
+  amount = "";
+  tradeStatus = "TRADE_SUCCESS";
+  code = "10000";
+  omit: Array<"total_amount" | "trade_no" | "out_trade_no"> = [];
+  calls = 0;
+  acceptNotify = false;
+
+  async query(outTradeNo: string): Promise<Record<string, unknown>> {
+    this.calls += 1;
+    const payload: Record<string, unknown> = {
+      code: this.code,
+      trade_status: this.tradeStatus,
+      total_amount: this.amount,
+      trade_no: this.tradeNo,
+      out_trade_no: this.outTradeNo || outTradeNo,
+    };
+    for (const field of this.omit) delete payload[field];
+    return { alipay_trade_query_response: payload };
+  }
+
+  checkNotifySign(postData: Record<string, string>): boolean {
+    return this.acceptNotify && postData.out_trade_no === (this.outTradeNo || postData.out_trade_no);
+  }
+}
+
+const SAMPLE_NOW = "2026-10-09T10:00:00+08:00";
+const ADMIN_TOKEN = "test-admin-token";
+const USER_TOKEN = "test-user-token";
+const PRINCIPAL = DEFAULT_DEMO_PRINCIPAL;
+
+const DEFAULT_AUTH = {
+  budget: { per_order_cents: 50_000, daily_cents: 200_000, total_cents: 500_000 },
+  valid_from: "2026-10-09T00:00:00+08:00",
+  valid_to: "2026-10-16T23:59:59+08:00",
+  merchant_whitelist: [MERCHANT_ID],
+  category: "desktop_stationery",
+  sku_keywords: ["签字笔", "A4纸", "文件夹"],
+};
+
+interface ApiResult {
+  status: number;
+  body: Record<string, any>;
+}
+
+function testConfig(): SandboxConfig {
+  const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  return {
+    appId: "2021000000000000",
+    privateKey: (privateKey.export({ type: "pkcs1", format: "der" }) as Buffer).toString("base64"),
+    alipayPublicKey: (publicKey.export({ type: "pkcs1", format: "der" }) as Buffer).toString("base64"),
+    gateway: SANDBOX_GATEWAY,
+    sellerId: "2088000000000001",
+    sellerName: "文具演示商户",
+  };
+}
+
+function testClient(config: SandboxConfig, script: ScriptedTradeQuery): ProductPayClient {
+  const sdk = new AlipaySdk({
+    appId: config.appId,
+    privateKey: config.privateKey,
+    alipayPublicKey: config.alipayPublicKey,
+    gateway: config.gateway,
+    keyType: "PKCS1",
+  });
+  return {
+    createPagePayUrl(params) {
+      return sdk.pageExecute("alipay.trade.page.pay", "GET", {
+        notifyUrl: params.notifyUrl,
+        returnUrl: params.returnUrl,
+        bizContent: params.bizContent,
+      });
+    },
+    queryTrade(outTradeNo) {
+      return script.query(outTradeNo);
+    },
+    checkNotifySign(postData) {
+      return script.checkNotifySign(postData);
+    },
+  };
+}
+
+async function start(
+  script = new ScriptedTradeQuery(),
+  demoPrincipal = PRINCIPAL,
+  publicBaseUrl: string | null = null,
+): Promise<{
+  base: string;
+  script: ScriptedTradeQuery;
+  principal: string;
+  close: () => Promise<void>;
+}> {
+  const config = testConfig();
+  const directory = mkdtempSync(path.join(tmpdir(), "agent-pay-"));
+  const app = createApp({
+    databasePath: path.join(directory, "agent-pay.sqlite"),
+    config,
+    productPay: testClient(config, script),
+    adminToken: ADMIN_TOKEN,
+    userToken: USER_TOKEN,
+    demoPrincipal,
+    publicBaseUrl,
+  });
+  await new Promise<void>((resolve) => {
+    app.server.listen(0, "127.0.0.1", () => resolve());
+  });
+  const address = app.server.address();
+  if (!address || typeof address === "string") throw new Error("server did not bind a port");
+  return {
+    base: `http://127.0.0.1:${address.port}`,
+    script,
+    principal: demoPrincipal,
+    close: () => closeServer(app.server, app),
+  };
+}
+
+function closeServer(server: Server, app: App): Promise<void> {
+  server.closeAllConnections();
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      app.close();
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+async function api(
+  base: string,
+  urlPath: string,
+  init?: RequestInit,
+  options?: { admin?: boolean; user?: boolean },
+): Promise<ApiResult> {
+  const response = await fetch(`${base}${urlPath}`, {
+    ...init,
+    headers: {
+      ...(init?.body ? { "content-type": "application/json" } : {}),
+      ...(options?.admin === false ? {} : { authorization: `Bearer ${ADMIN_TOKEN}` }),
+      ...(options?.user === false ? {} : { "x-user-authorization": `Bearer ${USER_TOKEN}` }),
+      ...(init?.headers ?? {}),
+    },
+  });
+  const text = await response.text();
+  return {
+    status: response.status,
+    body: text ? (JSON.parse(text) as Record<string, any>) : {},
+  };
+}
+
+function bizContent(pageRedirectionData: string): Record<string, any> {
+  const parsed = new URL(pageRedirectionData);
+  assert.equal(parsed.searchParams.get("method"), "alipay.trade.page.pay");
+  return JSON.parse(parsed.searchParams.get("biz_content") ?? "{}") as Record<string, any>;
+}
+
+async function boot(
+  base: string,
+  authorization: Record<string, unknown> = DEFAULT_AUTH,
+  principal = PRINCIPAL,
+): Promise<void> {
+  const clock = await api(base, "/sandbox/clock", {
+    method: "POST",
+    body: JSON.stringify({ now: SAMPLE_NOW }),
+  });
+  assert.equal(clock.status, 200);
+  const saved = await api(base, "/authorization", {
+    method: "PUT",
+    body: JSON.stringify(authorization),
+  });
+  assert.equal(saved.status, 200);
+  const confirmed = await api(base, "/authorization/confirm", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  assert.equal(confirmed.status, 200);
+  assert.equal(confirmed.body.confirmation.principal, principal);
+  assert.equal(confirmed.body.confirmation.revocable, true);
+  assert.equal(confirmed.body.confirmation.revoked_at, null);
+}
+
+async function issue(base: string): Promise<Record<string, any>> {
+  const token = await api(base, "/payment-tokens", { method: "POST" });
+  assert.equal(token.status, 200, JSON.stringify(token.body));
+  return token.body;
+}
+
+async function purchase(
+  base: string,
+  token: string,
+  items: Array<{ sku_id: string; quantity: number }>,
+  extra: Record<string, unknown> = {},
+): Promise<ApiResult> {
+  return api(base, "/agent/purchase", {
+    method: "POST",
+    body: JSON.stringify({ token, merchant_id: MERCHANT_ID, items, ...extra }),
+  });
+}
+
+async function fulfill(
+  base: string,
+  script: ScriptedTradeQuery,
+  token: string,
+  items: Array<{ sku_id: string; quantity: number }>,
+): Promise<{ cashier: ApiResult; paid: ApiResult }> {
+  const cashier = await purchase(base, token, items);
+  assert.equal(cashier.status, 200, JSON.stringify(cashier.body));
+  script.outTradeNo = cashier.body.out_trade_no;
+  script.amount = cashier.body.total_amount;
+  script.tradeNo = `20261009${String(cashier.body.out_trade_no).slice(-8)}`;
+  script.tradeStatus = "TRADE_SUCCESS";
+  script.omit = [];
+  const paid = await api(base, `/agent/orders/${cashier.body.out_trade_no}/confirm`, { method: "POST" });
+  return { cashier, paid };
+}
+
+test("health advertises product Agent Pay page.pay, not Machine Pay", async () => {
+  const app = await start();
+  try {
+    const health = await api(app.base, "/health");
+    assert.equal(health.body.payment_rail, "alipay.trade.page.pay");
+    assert.equal(health.body.settlement_mode, "local_query");
+    assert.equal(health.body.product, "office-agent-pay");
+    assert.equal(JSON.stringify(health.body).includes("Payment-Needed"), false);
+    assert.equal(JSON.stringify(health.body).includes("aipay.agent"), false);
+    assert.deepEqual(health.body.deny_reasons, [...DENY_REASONS]);
+  } finally {
+    await app.close();
+  }
+});
+
+test("token requires a saved scope and a user confirmation, not only the admin token", async () => {
+  const app = await start();
+  try {
+    const before = await api(app.base, "/payment-tokens", { method: "POST" });
+    assert.equal(before.status, 403);
+    assert.equal(before.body.error, "authorization_required");
+
+    await api(app.base, "/sandbox/clock", {
+      method: "POST",
+      body: JSON.stringify({ now: SAMPLE_NOW }),
+    });
+    const saved = await api(app.base, "/authorization", {
+      method: "PUT",
+      body: JSON.stringify(DEFAULT_AUTH),
+    });
+    assert.equal(saved.status, 200);
+    const still = await api(app.base, "/payment-tokens", { method: "POST" });
+    assert.equal(still.status, 403);
+    assert.equal(still.body.error, "user_confirmation_required");
+
+    const adminOnly = await api(
+      app.base,
+      "/authorization/confirm",
+      { method: "POST", body: JSON.stringify({}) },
+      { user: false },
+    );
+    assert.equal(adminOnly.status, 401);
+    assert.equal(adminOnly.body.error, "user_unauthorized");
+
+    const confirmed = await api(app.base, "/authorization/confirm", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    assert.equal(confirmed.body.confirmation.principal, PRINCIPAL);
+    assert.equal(confirmed.body.confirmation.scope_version, saved.body.scope_version);
+    assert.equal(confirmed.body.confirmation.scope.category, "desktop_stationery");
+    assert.ok(confirmed.body.confirmation.confirmed_at);
+    const token = await issue(app.base);
+    assert.equal(token.ttl_seconds, 300);
+    assert.equal(token.single_use, true);
+    assert.equal(token.confirmation_id, confirmed.body.confirmation.confirmation_id);
+
+    const audit = await api(app.base, "/authorization/audit");
+    const actions = audit.body.audit.map((event: { action: string }) => event.action);
+    assert.ok(actions.includes("authorization_saved"));
+    assert.ok(actions.includes("user_confirmed"));
+    assert.ok(actions.includes("token_issued"));
+    const confirmedEvent = audit.body.audit.find((event: { action: string }) => event.action === "user_confirmed");
+    assert.equal(confirmedEvent.principal, PRINCIPAL);
+  } finally {
+    await app.close();
+  }
+});
+
+test("DEMO_PRINCIPAL defaults when unset and rejects an overlong value", () => {
+  assert.equal(resolveDemoPrincipal(undefined), DEFAULT_DEMO_PRINCIPAL);
+  assert.equal(resolveDemoPrincipal("   "), DEFAULT_DEMO_PRINCIPAL);
+  assert.equal(resolveDemoPrincipal(" demo:office "), "demo:office");
+  assert.throws(() => resolveDemoPrincipal("x".repeat(121)), /DEMO_PRINCIPAL/);
+});
+
+test("confirm binds DEMO_PRINCIPAL and rejects a client principal", async () => {
+  const script = new ScriptedTradeQuery();
+  const app = await start(script, "demo:bound-office");
+  try {
+    const defaults = await api(app.base, "/authorization/defaults", undefined, { admin: false, user: false });
+    assert.equal(defaults.body.principal, "demo:bound-office");
+
+    await api(app.base, "/sandbox/clock", {
+      method: "POST",
+      body: JSON.stringify({ now: SAMPLE_NOW }),
+    });
+    await api(app.base, "/authorization", {
+      method: "PUT",
+      body: JSON.stringify(DEFAULT_AUTH),
+    });
+
+    const rejected = await api(app.base, "/authorization/confirm", {
+      method: "POST",
+      body: JSON.stringify({ principal: "office-user-demo" }),
+    });
+    assert.equal(rejected.status, 400);
+    assert.equal(rejected.body.error, "principal_not_accepted");
+    assert.equal((await api(app.base, "/authorization")).body.confirmation, null);
+
+    const adminWithPrincipal = await api(
+      app.base,
+      "/authorization/confirm",
+      { method: "POST", body: JSON.stringify({ principal: "office-user-demo" }) },
+      { user: false },
+    );
+    assert.equal(adminWithPrincipal.status, 401);
+    assert.equal(adminWithPrincipal.body.error, "user_unauthorized");
+
+    await boot(app.base, DEFAULT_AUTH, app.principal);
+    const token = await issue(app.base);
+    const cashier = await purchase(app.base, token.token, [{ sku_id: "sku-pen-cent", quantity: 1 }]);
+    assert.equal(cashier.status, 200);
+    assert.equal(cashier.body.principal, "demo:bound-office");
+
+    const audit = await api(app.base, "/authorization/audit");
+    for (const event of audit.body.audit) {
+      if (event.action === "authorization_saved") continue;
+      assert.equal(event.principal, "demo:bound-office");
+    }
+  } finally {
+    await app.close();
+  }
+});
+
+test("alipay-bot spawn env is allowlisted and session id must already be a UUID", () => {
+  const env = botEnv({
+    PATH: "/usr/bin",
+    HOME: "/home/demo",
+    ADMIN_TOKEN: "secret-admin",
+    USER_TOKEN: "secret-user",
+    AIPAY_OUTPUT_CHANNEL: "feishu",
+  });
+  assert.equal(env.PATH, "/usr/bin");
+  assert.equal(env.HOME, "/home/demo");
+  assert.equal(env.AIPAY_OUTPUT_CHANNEL, "feishu");
+  assert.equal("ADMIN_TOKEN" in env, false);
+  assert.equal("USER_TOKEN" in env, false);
+  assert.equal(resolveSessionId({ AIPAY_SESSION_ID: "11111111-1111-4111-8111-111111111111" }), "11111111-1111-4111-8111-111111111111");
+  assert.equal(
+    resolveSessionId({ CURSOR_CONVERSATION_ID: "22222222-2222-4222-8222-222222222222" }),
+    "22222222-2222-4222-8222-222222222222",
+  );
+  assert.throws(() => resolveSessionId({ AIPAY_SESSION_ID: "session-123" }), /UUID/);
+  assert.throws(() => resolveSessionId({ CURSOR_CONVERSATION_ID: "bc-22222222-2222-4222-8222-222222222222" }), /UUID/);
+  assert.throws(() => resolveSessionId({}), /AIPAY_SESSION_ID/);
+});
+
+test("budget spent and order reserve share one transaction across connections", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "agent-pay-budget-"));
+  const file = path.join(directory, "agent-pay.sqlite");
+  const first = new AgentPayDatabase(file);
+  const second = new AgentPayDatabase(file);
+  const now = new Date("2026-10-09T02:00:00.000Z");
+  const reservation = { now, perOrderCents: 50_000, dailyCents: 800, totalCents: 500_000 };
+  const insert = (token: string) => {
+    const db = token.endsWith("a") ? first : second;
+    db.insertToken({
+      token,
+      issued_at: now.toISOString(),
+      expires_at: new Date(now.getTime() + 300_000).toISOString(),
+      ttl_seconds: 300,
+      single_use: true,
+      used: false,
+      confirmation_id: "confirm_budget",
+      scope_version: 1,
+    });
+  };
+  insert("paytok_a");
+  insert("paytok_b");
+  const order = (outTradeNo: string, paymentToken: string) => ({
+    outTradeNo,
+    amount: "8.00",
+    amountCents: 800,
+    subject: "黑色签字笔x1",
+    productCode: "FAST_INSTANT_TRADE_PAY",
+    goodsName: "黑色签字笔x1",
+    timeExpire: "2026-10-09 10:30:00",
+    timeExpireMs: now.getTime() + 30 * 60 * 1000,
+    merchantId: MERCHANT_ID,
+    merchantName: "文具演示商户",
+    lines: [],
+    ignoredClientAmountCents: null,
+    paymentToken,
+    pageRedirectionData: "https://example.test/cashier",
+    requestFingerprint: outTradeNo,
+    scopeVersion: 1,
+    confirmationId: "confirm_budget",
+    principal: PRINCIPAL,
+    spendDay: shanghaiDate(now),
+    createdAt: now.toISOString(),
+  });
+  first.consumeTokenAndCreateOrder("paytok_a", order("ORDER_A", "paytok_a"), reservation);
+  assert.equal(first.getToken("paytok_a")?.used, true);
+  assert.throws(
+    () => second.consumeTokenAndCreateOrder("paytok_b", order("ORDER_B", "paytok_b"), reservation),
+    (error: unknown) => error instanceof DenyError && error.deny_reason === "over_budget" && error.detail.limit === "daily",
+  );
+  assert.equal(second.getToken("paytok_b")?.used, false);
+  assert.equal(second.findOrder("ORDER_B"), null);
+  assert.throws(
+    () =>
+      second.consumeTokenAndCreateOrder("paytok_b", { ...order("ORDER_C", "paytok_b"), amountCents: 50_400, amount: "504.00" }, {
+        ...reservation,
+        dailyCents: 200_000,
+        totalCents: 500_000,
+      }),
+    (error: unknown) => error instanceof DenyError && error.detail.limit === "per_order",
+  );
+  assert.equal(second.getToken("paytok_b")?.used, false);
+  first.close();
+  second.close();
+});
+
+test("revoking the user confirmation blocks new tokens", async () => {
+  const app = await start();
+  try {
+    await boot(app.base);
+    const revoked = await api(app.base, "/authorization/revoke", { method: "POST" });
+    assert.equal(revoked.status, 200);
+    assert.ok(revoked.body.confirmation.revoked_at);
+    const denied = await api(app.base, "/payment-tokens", { method: "POST" });
+    assert.equal(denied.body.error, "user_confirmation_required");
+  } finally {
+    await app.close();
+  }
+});
+
+test("page.pay uses the server catalog price and ignores the client amount", async () => {
+  const app = await start();
+  try {
+    await boot(app.base);
+    const token = await issue(app.base);
+    const cashier = await purchase(app.base, token.token, [{ sku_id: "sku-pen", quantity: 1 }], { amount_cents: 1 });
+    assert.equal(cashier.status, 200);
+    assert.equal(cashier.body.payment_rail, "alipay.trade.page.pay");
+    assert.equal(cashier.body.product_code, "FAST_INSTANT_TRADE_PAY");
+    assert.equal(cashier.body.total_amount, "8.00");
+    assert.equal(cashier.body.amount_cents, 800);
+    assert.equal(cashier.body.ignored_client_amount_cents, 1);
+    const biz = bizContent(cashier.body.page_redirection_data);
+    assert.equal(biz.total_amount, "8.00");
+    assert.equal(biz.product_code, "FAST_INSTANT_TRADE_PAY");
+    assert.equal(biz.out_trade_no, cashier.body.out_trade_no);
+    const intent = cashierIntentSummary("黑色签字笔x1", "8.00", "文具演示商户");
+    assert.equal(cashier.body.alipay_bot.submit_payment.includes(cashier.body.page_redirection_data), true);
+    assert.match(cashier.body.alipay_bot.submit_payment, /alipay-bot submit-payment --session-id <AIPAY_SESSION_ID>/);
+    assert.match(cashier.body.alipay_bot.submit_payment, /--intent-summary/);
+    assert.equal(cashier.body.alipay_bot.submit_payment.includes(intent), true);
+    assert.equal(JSON.stringify(cashier.body.alipay_bot).includes("trigger-payment-signal"), false);
+    assert.match(cashier.body.alipay_bot.query_payment_status, /alipay-bot query-payment-status --out-shake-no/);
+    assert.equal((await api(app.base, `/payment-tokens/${token.token}`)).body.used, true);
+    assert.equal((await api(app.base, "/expense-drafts")).body.expense_drafts.length, 0);
+  } finally {
+    await app.close();
+  }
+});
+
+test("PUBLIC_BASE_URL is the notify and return origin", async () => {
+  assert.equal(resolvePublicBaseUrl("https://pay.example.test/agent/"), "https://pay.example.test/agent");
+  assert.throws(() => resolvePublicBaseUrl("https://user:secret@pay.example.test"), /PUBLIC_BASE_URL/);
+  assert.throws(() => resolvePublicBaseUrl("http://127.0.0.1:3000", { https: true }), /https/);
+  const app = await start(new ScriptedTradeQuery(), PRINCIPAL, "https://pay.example.test/agent");
+  try {
+    await boot(app.base);
+    const token = await issue(app.base);
+    const cashier = await purchase(app.base, token.token, [{ sku_id: "sku-pen-cent", quantity: 1 }]);
+    const page = new URL(cashier.body.page_redirection_data);
+    assert.equal(page.searchParams.get("notify_url"), "https://pay.example.test/agent/alipay/notify");
+    assert.equal(page.searchParams.get("return_url"), "https://pay.example.test/agent/");
+    assert.equal((await api(app.base, "/health")).body.settlement_mode, "public_notify");
+  } finally {
+    await app.close();
+  }
+});
+
+test("sku-pen-cent bills exactly 1 cent", async () => {
+  const app = await start();
+  try {
+    await boot(app.base);
+    const token = await issue(app.base);
+    const cashier = await purchase(app.base, token.token, [{ sku_id: "sku-pen-cent", quantity: 1 }]);
+    assert.equal(cashier.status, 200);
+    assert.equal(cashier.body.total_amount, "0.01");
+    assert.equal(cashier.body.amount_cents, 1);
+    assert.equal(bizContent(cashier.body.page_redirection_data).total_amount, "0.01");
+    assert.match(cashier.body.subject, /签字笔/);
+  } finally {
+    await app.close();
+  }
+});
+
+test("trade.query success writes one expense draft and confirm is idempotent", async () => {
+  const script = new ScriptedTradeQuery();
+  const app = await start(script);
+  try {
+    await boot(app.base);
+    const token = await issue(app.base);
+    const { cashier, paid } = await fulfill(app.base, script, token.token, [{ sku_id: "sku-pen", quantity: 1 }]);
+    assert.equal(paid.status, 200);
+    assert.equal(paid.body.receipt_callback.amount_cents, 800);
+    assert.equal(paid.body.receipt_callback.merchant_name, "文具演示商户");
+    assert.equal(paid.body.receipt_callback.order_id, cashier.body.out_trade_no);
+    assert.equal(paid.body.request_fingerprint, cashier.body.request_fingerprint);
+    assert.equal(paid.body.already_confirmed, false);
+    const again = await api(app.base, `/agent/orders/${cashier.body.out_trade_no}/confirm`, { method: "POST" });
+    assert.equal(again.status, 200);
+    assert.equal(again.body.already_confirmed, true);
+    assert.equal(again.body.receipt_callback.expense_draft_id, paid.body.receipt_callback.expense_draft_id);
+    assert.equal((await api(app.base, "/expense-drafts")).body.expense_drafts.length, 1);
+    assert.equal(script.calls, 2);
+    const receipt = await fetch(paid.body.receipt_callback.receipt_url, {
+      headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+    });
+    assert.equal(receipt.status, 200);
+    assert.match(await receipt.text(), /800/);
+  } finally {
+    await app.close();
+  }
+});
+
+test("a query that omits amount or trade_no does not write a draft", async () => {
+  for (const field of ["total_amount", "trade_no"] as const) {
+    const script = new ScriptedTradeQuery();
+    const app = await start(script);
+    try {
+      await boot(app.base);
+      const token = await issue(app.base);
+      const cashier = await purchase(app.base, token.token, [{ sku_id: "sku-pen", quantity: 1 }]);
+      script.outTradeNo = cashier.body.out_trade_no;
+      script.amount = cashier.body.total_amount;
+      script.tradeNo = "2026100900000001";
+      script.tradeStatus = "TRADE_SUCCESS";
+      script.omit = [field];
+      const paid = await api(app.base, `/agent/orders/${cashier.body.out_trade_no}/confirm`, { method: "POST" });
+      assert.equal(paid.status, 409, field);
+      assert.equal(paid.body.error, "trade_query_incomplete", field);
+      assert.equal((await api(app.base, "/expense-drafts")).body.expense_drafts.length, 0, field);
+    } finally {
+      await app.close();
+    }
+  }
+});
+
+test("changing authorization blocks fulfillment of the old unpaid order", async () => {
+  const script = new ScriptedTradeQuery();
+  const app = await start(script);
+  try {
+    await boot(app.base);
+    const token = await issue(app.base);
+    const cashier = await purchase(app.base, token.token, [{ sku_id: "sku-pen", quantity: 1 }]);
+    script.outTradeNo = cashier.body.out_trade_no;
+    script.amount = cashier.body.total_amount;
+    script.tradeNo = "2026100900000002";
+    script.tradeStatus = "TRADE_SUCCESS";
+    await api(app.base, "/authorization", {
+      method: "PUT",
+      body: JSON.stringify({
+        ...DEFAULT_AUTH,
+        budget: { per_order_cents: 40_000, daily_cents: 200_000, total_cents: 500_000 },
+      }),
+    });
+    const paid = await api(app.base, `/agent/orders/${cashier.body.out_trade_no}/confirm`, { method: "POST" });
+    assert.equal(paid.status, 409);
+    assert.equal(paid.body.error, "authorization_changed");
+    assert.equal((await api(app.base, "/expense-drafts")).body.expense_drafts.length, 0);
+  } finally {
+    await app.close();
+  }
+});
+
+test("sensitive reads require the admin bearer", async () => {
+  const app = await start();
+  try {
+    await boot(app.base);
+    const leaked = await api(app.base, "/authorization", undefined, { admin: false });
+    assert.equal(leaked.status, 401);
+    assert.equal(leaked.body.authorization, undefined);
+    const drafts = await api(app.base, "/expense-drafts", undefined, { admin: false });
+    assert.equal(drafts.status, 401);
+    const audit = await api(app.base, "/authorization/audit", undefined, { admin: false });
+    assert.equal(audit.status, 401);
+  } finally {
+    await app.close();
+  }
+});
+
+test("notify with a valid test-double signature fulfills once; a bad signature does not", async () => {
+  const script = new ScriptedTradeQuery();
+  const app = await start(script);
+  try {
+    await boot(app.base);
+    const token = await issue(app.base);
+    const cashier = await purchase(app.base, token.token, [{ sku_id: "sku-pen-cent", quantity: 1 }]);
+    script.outTradeNo = cashier.body.out_trade_no;
+    script.amount = "0.01";
+    script.tradeNo = "2026100900000003";
+    script.acceptNotify = false;
+    const rejected = await fetch(`${app.base}/alipay/notify`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        out_trade_no: script.outTradeNo,
+        trade_no: script.tradeNo,
+        total_amount: script.amount,
+        trade_status: "TRADE_SUCCESS",
+      }),
+    });
+    assert.equal(await rejected.text(), "failure");
+    assert.equal((await api(app.base, "/expense-drafts")).body.expense_drafts.length, 0);
+    script.acceptNotify = true;
+    const accepted = await fetch(`${app.base}/alipay/notify`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        out_trade_no: script.outTradeNo,
+        trade_no: script.tradeNo,
+        total_amount: script.amount,
+        trade_status: "TRADE_SUCCESS",
+      }),
+    });
+    assert.equal(await accepted.text(), "success");
+    const drafts = await api(app.base, "/expense-drafts");
+    assert.equal(drafts.body.expense_drafts.length, 1);
+    assert.equal(drafts.body.expense_drafts[0].amount_cents, 1);
+  } finally {
+    await app.close();
+  }
+});
+
+test("notify after an authorization change acks success and does not write a draft", async () => {
+  const script = new ScriptedTradeQuery();
+  const app = await start(script);
+  try {
+    await boot(app.base);
+    const token = await issue(app.base);
+    const cashier = await purchase(app.base, token.token, [{ sku_id: "sku-pen", quantity: 1 }]);
+    script.outTradeNo = cashier.body.out_trade_no;
+    script.amount = cashier.body.total_amount;
+    script.tradeNo = "2026100900000099";
+    script.acceptNotify = true;
+    await api(app.base, "/authorization", {
+      method: "PUT",
+      body: JSON.stringify({
+        ...DEFAULT_AUTH,
+        budget: { per_order_cents: 40_000, daily_cents: 200_000, total_cents: 500_000 },
+      }),
+    });
+    const form = new URLSearchParams({
+      out_trade_no: script.outTradeNo,
+      trade_no: script.tradeNo,
+      total_amount: script.amount,
+      trade_status: "TRADE_SUCCESS",
+    });
+    const notify = () =>
+      fetch(`${app.base}/alipay/notify`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: form,
+      });
+    assert.equal(await (await notify()).text(), "success");
+    assert.equal(await (await notify()).text(), "success");
+    assert.equal((await api(app.base, "/expense-drafts")).body.expense_drafts.length, 0);
+    const queried = await api(app.base, `/agent/orders/${cashier.body.out_trade_no}/confirm`, { method: "POST" });
+    assert.equal(queried.status, 409);
+    assert.equal(queried.body.error, "authorization_changed");
+    assert.equal((await api(app.base, "/expense-drafts")).body.expense_drafts.length, 0);
+  } finally {
+    await app.close();
+  }
+});
+
+test("deny over_budget for per-order, daily, and total limits", async () => {
+  const script = new ScriptedTradeQuery();
+  const app = await start(script);
+  try {
+    await boot(app.base);
+    const price = 800;
+    const quantity = Math.floor(50_000 / price) + 1;
+    const perOrder = await issue(app.base);
+    const denied = await purchase(app.base, perOrder.token, [{ sku_id: "sku-pen", quantity }]);
+    assert.equal(denied.body.deny_reason, "over_budget");
+    assert.equal(denied.body.limit, "per_order");
+    assert.equal((await api(app.base, `/payment-tokens/${perOrder.token}`)).body.used, false);
+
+    await boot(app.base, {
+      ...DEFAULT_AUTH,
+      budget: { per_order_cents: 50_000, daily_cents: price, total_cents: 500_000 },
+    });
+    const first = await issue(app.base);
+    assert.equal((await purchase(app.base, first.token, [{ sku_id: "sku-pen", quantity: 1 }])).status, 200);
+    const second = await issue(app.base);
+    const daily = await purchase(app.base, second.token, [{ sku_id: "sku-pen", quantity: 1 }]);
+    assert.equal(daily.body.deny_reason, "over_budget");
+    assert.equal(daily.body.limit, "daily");
+
+    await api(app.base, "/sandbox/reset", { method: "POST" });
+    await boot(app.base, {
+      ...DEFAULT_AUTH,
+      budget: { per_order_cents: 50_000, daily_cents: 200_000, total_cents: price },
+    });
+    const totalFirst = await issue(app.base);
+    const paid = await fulfill(app.base, script, totalFirst.token, [{ sku_id: "sku-pen", quantity: 1 }]);
+    assert.equal(paid.paid.status, 200);
+    await api(app.base, "/sandbox/clock", {
+      method: "POST",
+      body: JSON.stringify({ now: "2026-10-10T10:00:00+08:00" }),
+    });
+    const totalSecond = await issue(app.base);
+    const total = await purchase(app.base, totalSecond.token, [{ sku_id: "sku-pen", quantity: 1 }]);
+    assert.equal(total.body.deny_reason, "over_budget");
+    assert.equal(total.body.limit, "total");
+  } finally {
+    await app.close();
+  }
+});
+
+test("deny merchant_not_allowed, expired, token_reused, and sku_not_allowed", async () => {
+  const app = await start();
+  try {
+    await boot(app.base);
+    const outsider = await issue(app.base);
+    const other = await api(app.base, "/agent/purchase", {
+      method: "POST",
+      body: JSON.stringify({
+        token: outsider.token,
+        merchant_id: "cafe-demo-009",
+        items: [{ sku_id: "sku-pen", quantity: 1 }],
+      }),
+    });
+    assert.equal(other.body.deny_reason, "merchant_not_allowed");
+
+    const mugToken = await issue(app.base);
+    const mug = await purchase(app.base, mugToken.token, [{ sku_id: "sku-mug", quantity: 1 }]);
+    assert.equal(mug.body.deny_reason, "sku_not_allowed");
+    assert.equal((await api(app.base, `/payment-tokens/${mugToken.token}`)).body.used, false);
+
+    const reused = await issue(app.base);
+    assert.equal((await purchase(app.base, reused.token, [{ sku_id: "sku-pen", quantity: 1 }])).status, 200);
+    const second = await purchase(app.base, reused.token, [{ sku_id: "sku-pen", quantity: 1 }]);
+    assert.equal(second.body.deny_reason, "token_reused");
+
+    const expiring = await issue(app.base);
+    await api(app.base, "/sandbox/clock", {
+      method: "POST",
+      body: JSON.stringify({ now: new Date(Date.parse(expiring.expires_at) + 1000).toISOString() }),
+    });
+    const expired = await purchase(app.base, expiring.token, [{ sku_id: "sku-pen", quantity: 1 }]);
+    assert.equal(expired.body.deny_reason, "expired");
+  } finally {
+    await app.close();
+  }
+});
+
+async function propose(base: string, token: string, text: string, extra: Record<string, unknown> = {}): Promise<ApiResult> {
+  return api(base, "/agent/propose", {
+    method: "POST",
+    body: JSON.stringify({ token, text, ...extra }),
+  });
+}
+
+test("natural language request splits pens and A4 paper into a server-priced plan", async () => {
+  const app = await start();
+  try {
+    await boot(app.base);
+    const token = await issue(app.base);
+    const catalog = await api(app.base, "/catalog");
+    const proposed = await propose(app.base, token.token, "会议室缺笔和 A4 纸，下周开会用");
+    assert.equal(proposed.status, 200, JSON.stringify(proposed.body));
+    assert.equal(proposed.body.ok, true);
+    assert.equal(proposed.body.confirmable, true);
+    assert.equal(proposed.body.page_redirection_data, undefined);
+    assert.equal(proposed.body.amount_cents, 3_300);
+    assert.equal(proposed.body.total_amount, "33.00");
+    assert.deepEqual(
+      proposed.body.lines.map((line: { sku_id: string; quantity: number }) => ({
+        sku_id: line.sku_id,
+        quantity: line.quantity,
+      })),
+      [
+        { sku_id: "sku-pen", quantity: 1 },
+        { sku_id: "sku-paper", quantity: 1 },
+      ],
+    );
+    for (const line of proposed.body.lines) {
+      const sku = catalog.body.skus.find((item: { sku_id: string }) => item.sku_id === line.sku_id);
+      assert.equal(line.unit_price_cents, sku.unit_price_cents);
+      assert.equal(line.line_cents, sku.unit_price_cents * line.quantity);
+    }
+    assert.equal(proposed.body.budget.remaining_daily_cents, 200_000);
+    assert.equal(proposed.body.budget.remaining_total_cents, 500_000);
+    assert.equal(proposed.body.budget.per_order_cents, 50_000);
+  } finally {
+    await app.close();
+  }
+});
+
+test("vague demand asks for clarification and does not open a cashier", async () => {
+  const app = await start();
+  try {
+    await boot(app.base);
+    const token = await issue(app.base);
+    const proposed = await propose(app.base, token.token, "买点东西，下周开会用");
+    assert.equal(proposed.status, 422, JSON.stringify(proposed.body));
+    assert.equal(proposed.body.ok, false);
+    assert.equal(proposed.body.error, "needs_clarification");
+    assert.ok(proposed.body.questions.length >= 1);
+    assert.equal(proposed.body.plan_id, undefined);
+    assert.equal(proposed.body.page_redirection_data, undefined);
+    const direct = await purchase(app.base, token.token, [{ sku_id: "sku-pen", quantity: 1 }]);
+    assert.equal(direct.status, 200, JSON.stringify(direct.body));
+    assert.equal(direct.body.page_redirection_data === undefined, false);
+  } finally {
+    await app.close();
+  }
+});
+
+test("an item outside the keyword whitelist is refused without a substitute", async () => {
+  const app = await start();
+  try {
+    await boot(app.base);
+    const token = await issue(app.base);
+    const proposed = await propose(app.base, token.token, "会议室缺笔和马克杯");
+    assert.equal(proposed.status, 422, JSON.stringify(proposed.body));
+    assert.equal(proposed.body.error, "not_purchasable");
+    assert.equal(proposed.body.page_redirection_data, undefined);
+    assert.equal(proposed.body.lines, undefined);
+    assert.equal(proposed.body.plan_id, undefined);
+    const names = proposed.body.rejected.map((item: { name: string }) => item.name).join(" ");
+    assert.match(names, /马克杯/);
+    assert.equal(JSON.stringify(proposed.body).includes("sku-pen"), false);
+    assert.equal(JSON.stringify(proposed.body).includes("sku-pen-cent"), false);
+  } finally {
+    await app.close();
+  }
+});
+
+test("confirmed plan total matches the catalog quote", async () => {
+  const app = await start();
+  try {
+    await boot(app.base);
+    const token = await issue(app.base);
+    const catalog = await api(app.base, "/catalog");
+    const proposed = await propose(app.base, token.token, "两支笔和一包A4纸", {
+      amount_cents: 1,
+      items: [{ sku_id: "sku-mug", quantity: 9, unit_price_cents: 1 }],
+    });
+    assert.equal(proposed.status, 200, JSON.stringify(proposed.body));
+    const pen = catalog.body.skus.find((item: { sku_id: string }) => item.sku_id === "sku-pen");
+    const paper = catalog.body.skus.find((item: { sku_id: string }) => item.sku_id === "sku-paper");
+    assert.equal(proposed.body.amount_cents, pen.unit_price_cents * 2 + paper.unit_price_cents);
+    assert.equal(proposed.body.lines[0].unit_price_cents, pen.unit_price_cents);
+    assert.equal(proposed.body.lines[1].unit_price_cents, paper.unit_price_cents);
+    const confirmed = await api(app.base, `/agent/plans/${proposed.body.plan_id}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({
+        token: token.token,
+        amount_cents: 1,
+        items: [{ sku_id: "sku-mug", quantity: 99 }],
+      }),
+    });
+    assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body));
+    assert.equal(confirmed.body.amount_cents, proposed.body.amount_cents);
+    assert.equal(confirmed.body.total_amount, proposed.body.total_amount);
+    assert.equal(bizContent(confirmed.body.page_redirection_data).total_amount, proposed.body.total_amount);
+  } finally {
+    await app.close();
+  }
+});
+
+test("purchase before plan confirmation does not return page.pay", async () => {
+  const app = await start();
+  try {
+    await boot(app.base);
+    const token = await issue(app.base);
+    const proposed = await propose(app.base, token.token, "会议室缺笔和 A4 纸，下周开会用");
+    assert.equal(proposed.body.confirmable, true);
+    const direct = await purchase(
+      app.base,
+      token.token,
+      proposed.body.lines.map((line: { sku_id: string; quantity: number }) => ({
+        sku_id: line.sku_id,
+        quantity: line.quantity,
+      })),
+    );
+    assert.equal(direct.status, 409);
+    assert.equal(direct.body.error, "plan_not_confirmed");
+    assert.equal(direct.body.page_redirection_data, undefined);
+    const stored = await api(app.base, `/payment-tokens/${encodeURIComponent(token.token)}`);
+    assert.equal(stored.body.used, false);
+    const confirmed = await api(app.base, `/agent/plans/${proposed.body.plan_id}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ token: token.token }),
+    });
+    assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body));
+    assert.equal(confirmed.body.amount_cents, proposed.body.amount_cents);
+    assert.equal(typeof confirmed.body.page_redirection_data, "string");
+  } finally {
+    await app.close();
+  }
+});
+
+test("over-budget plan is not rewritten into a cheaper order", async () => {
+  const app = await start();
+  try {
+    await boot(app.base);
+    const token = await issue(app.base);
+    const proposed = await propose(app.base, token.token, "100支笔");
+    assert.equal(proposed.status, 200, JSON.stringify(proposed.body));
+    assert.equal(proposed.body.confirmable, false);
+    assert.equal(proposed.body.deny_reason, "over_budget");
+    assert.equal(proposed.body.page_redirection_data, undefined);
+    assert.equal(proposed.body.lines.length, 1);
+    assert.equal(proposed.body.lines[0].sku_id, "sku-pen");
+    assert.equal(proposed.body.lines[0].quantity, 100);
+    assert.equal(proposed.body.lines[0].unit_price_cents, 800);
+    assert.equal(JSON.stringify(proposed.body).includes("sku-pen-cent"), false);
+    const confirmed = await api(app.base, `/agent/plans/${proposed.body.plan_id}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ token: token.token }),
+    });
+    assert.equal(confirmed.status, 403);
+    assert.equal(confirmed.body.deny_reason, "over_budget");
+    assert.equal(confirmed.body.page_redirection_data, undefined);
+    assert.equal(confirmed.body.lines[0].quantity, 100);
+    const stored = await api(app.base, `/payment-tokens/${encodeURIComponent(token.token)}`);
+    assert.equal(stored.body.used, false);
+  } finally {
+    await app.close();
+  }
+});
+
+test("demo env example is local degraded and leaves PUBLIC_BASE_URL unset", () => {
+  const entries = new Map<string, string>();
+  const text = readFileSync(new URL("../.env.example", import.meta.url), "utf8");
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    entries.set(trimmed.slice(0, eq), trimmed.slice(eq + 1));
+  }
+  assert.equal(entries.get("LOCAL_DEGRADED"), "1");
+  assert.equal(entries.has("PUBLIC_BASE_URL"), false);
+  assert.equal(entries.has("ADMIN_TOKEN"), true);
+  assert.equal(entries.has("USER_TOKEN"), true);
+  assert.notEqual(entries.get("ADMIN_TOKEN"), entries.get("USER_TOKEN"));
+  assert.equal(entries.get("DEMO_PRINCIPAL"), "demo:office-user");
+});
+
+test("sandbox config maps the Node.js PKCS#1 field and refuses a non-sandbox gateway", () => {
+  const parsed = parseSandboxConfig({
+    appIds: [
+      {
+        appId: "2021000000000000",
+        appPrivateKey: "pkcs8-ignored",
+        appPrivatePkcsKey: "pkcs1-used",
+        alipayPublicKey: "alipay-public",
+      },
+    ],
+    sandboxAccounts: { partner: { userId: "2088000000000001" } },
+  });
+  assert.equal(parsed.privateKey, "pkcs1-used");
+  assert.equal(parsed.gateway, SANDBOX_GATEWAY);
+  assert.equal(parsed.sellerId, "2088000000000001");
+  const previous = process.env.ALIPAY_GATEWAY;
+  process.env.ALIPAY_GATEWAY = "https://openapi.alipay.com/gateway.do";
+  try {
+    assert.throws(() =>
+      parseSandboxConfig({
+        appIds: [{ appId: "2021000000000000", appPrivatePkcsKey: "k", alipayPublicKey: "p" }],
+        sandboxAccounts: { partner: { userId: "2088000000000001" } },
+      }),
+    );
+  } finally {
+    if (previous === undefined) delete process.env.ALIPAY_GATEWAY;
+    else process.env.ALIPAY_GATEWAY = previous;
+  }
+});

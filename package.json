@@ -1,0 +1,29 @@
+{
+  "name": "agent-pay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Office stationery procurement sandbox for Agent Pay",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "demo": "node scripts/demo.mjs",
+    "dev": "tsx src/index.ts",
+    "test": "tsx --test tests/acceptance.test.ts",
+    "typecheck": "tsc --noEmit",
+    "sandbox-evidence": "node scripts/sandbox-evidence.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "tsx": "^4.20.3",
+    "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "alipay-sdk": "^4.14.0"
+  },
+  "overrides": {
+    "urllib": "4.9.1"
+  }
+}

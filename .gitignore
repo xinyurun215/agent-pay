@@ -1,0 +1,8 @@
+node_modules/
+dist/
+data/
+*.log
+.DS_Store
+/.alipay-sandbox.json
+/.env
+/artifacts/

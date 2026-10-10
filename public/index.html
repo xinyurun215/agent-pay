@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent Pay · 办公文具采购沙箱</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header>
+    <div>
+      <div class="stamp">SANDBOX</div>
+      <h1>办公文具采购</h1>
+      <p class="lede">按顺序走完五步：用户授权、下单、收银台交接、凭证回传、拒付演示。金额以服务端目录为准。本页不代付款，也不运行 alipay-bot。</p>
+    </div>
+    <div class="clock">
+      <div>沙箱时间</div>
+      <strong id="clock-now">—</strong>
+      <div id="clock-source" class="hint"></div>
+    </div>
+  </header>
+
+  <main class="steps">
+    <section class="card" id="step-auth">
+      <div class="step-head">
+        <h2>1. 用户授权</h2>
+        <span class="step-status wait" id="status-auth">未开始</span>
+      </div>
+      <p class="hint">先保存预算、商户和有效期，再由用户本人确认。主体由服务端按 USER_TOKEN 绑定。管理令牌不能代替用户确认。</p>
+      <form id="auth-form">
+        <div class="grid two">
+          <label>管理令牌
+            <input id="admin-token" type="password" autocomplete="off" placeholder="ADMIN_TOKEN" />
+          </label>
+          <label>用户令牌
+            <input id="user-token" type="password" autocomplete="off" placeholder="USER_TOKEN" />
+          </label>
+        </div>
+        <p id="principal-view" class="hint">授权主体由服务端绑定，默认 demo:office-user。确认请求不能填写 principal。</p>
+        <div class="grid">
+          <label>单笔上限（分）
+            <input id="per-order" name="per_order_cents" type="number" min="0" step="1" required />
+          </label>
+          <label>单日上限（分）
+            <input id="daily" name="daily_cents" type="number" min="0" step="1" required />
+          </label>
+          <label>总额上限（分）
+            <input id="total" name="total_cents" type="number" min="0" step="1" required />
+          </label>
+        </div>
+        <div class="grid two" style="margin-top: 0.6rem">
+          <label>生效时间
+            <input id="valid-from" name="valid_from" required />
+          </label>
+          <label>失效时间
+            <input id="valid-to" name="valid_to" required />
+          </label>
+        </div>
+        <div class="grid two" style="margin-top: 0.6rem">
+          <label>商户白名单
+            <input id="whitelist" name="merchant_whitelist" required />
+          </label>
+          <label>商品关键词
+            <input id="keywords" name="sku_keywords" required />
+          </label>
+        </div>
+        <div class="actions">
+          <button type="submit">保存授权</button>
+          <button type="button" class="secondary" id="confirm-auth">用户确认授权</button>
+          <button type="button" class="secondary" id="revoke-auth">撤销确认</button>
+          <button type="button" class="secondary" id="use-sample-time">沙箱时间设为 2026-10-09 10:00 +08</button>
+        </div>
+      </form>
+      <p id="auth-state" class="hint"></p>
+    </section>
+
+    <section class="card" id="step-order">
+      <div class="step-head">
+        <h2>2. 下单</h2>
+        <span class="step-status wait" id="status-order">未下单</span>
+      </div>
+      <p class="hint">先签发 300 秒单次令牌。用一句话说明要买什么，先看方案里的商品、数量、单价、总价和剩余预算。确认方案后才生成收银台链接。价格只按服务端目录计算。</p>
+      <div class="actions">
+        <button type="button" id="issue-token">签发支付令牌</button>
+      </div>
+      <p id="token-view" class="token">尚未签发</p>
+      <label>自然语言需求
+        <textarea id="intent-text" rows="2" placeholder="例如：会议室缺笔和 A4 纸，下周开会用"></textarea>
+      </label>
+      <div class="actions">
+        <button type="button" id="propose">听懂并出方案</button>
+        <button type="button" id="confirm-plan" hidden>确认方案并生成收银台</button>
+      </div>
+      <div id="plan" class="plan"></div>
+      <p class="hint">下面的目录数量是手动下单。有待确认方案时，直接购买不会出收银台。</p>
+      <div id="catalog" class="catalog"></div>
+      <div class="grid two" style="margin-top: 0.8rem">
+        <label>商户编号
+          <input id="merchant-id" value="stationery-demo-001" />
+        </label>
+        <label>客户端申报金额（分，不参与成交）
+          <input id="client-amount" type="number" min="0" step="1" placeholder="留空则不申报" />
+        </label>
+      </div>
+      <div class="actions">
+        <button type="button" id="pay">创建订单并生成收银台链接</button>
+      </div>
+    </section>
+
+    <section class="card" id="step-cashier">
+      <div class="step-head">
+        <h2>3. 收银台交接</h2>
+        <span class="step-status wait" id="status-cashier">未执行支付</span>
+      </div>
+      <p class="hint">下面是原始 page.pay 链接，以及官方交接命令。session-id 必须是沙箱登录得到的 UUID，写在环境变量 AIPAY_SESSION_ID 里。本页不运行这条命令，也不代用户付款。</p>
+      <p class="label">原始收银台链接</p>
+      <pre id="cashier-url" class="command">下单成功后显示在这里。</pre>
+      <p class="label">官方命令</p>
+      <pre id="submit-command" class="command">alipay-bot submit-payment --session-id $AIPAY_SESSION_ID --payment-link '&lt;原始 page.pay URL&gt;' --intent-summary '服务内容：…，支付金额：¥…，支付对象：文具演示商户'</pre>
+    </section>
+
+    <section class="card" id="step-receipt">
+      <div class="step-head">
+        <h2>4. 凭证回传</h2>
+        <span class="step-status wait" id="status-receipt">待查询</span>
+      </div>
+      <p id="receipt-mode" class="hint">报销草稿保持待查询，直到支付宝返回一笔金额和订单号都对得上的已支付交易。测试替身不算这笔交易。</p>
+      <div class="actions">
+        <button type="button" class="secondary" id="confirm-trade">查询支付宝订单</button>
+      </div>
+      <div id="drafts">待查询。还没有来自支付宝已支付交易的报销草稿。</div>
+    </section>
+
+    <section class="card" id="step-deny">
+      <div class="step-head">
+        <h2>5. 拒付演示</h2>
+        <span class="step-status wait" id="status-deny">未演示</span>
+      </div>
+      <p class="hint">每个按钮会重置沙箱、写入默认授权并让用户确认，然后返回下列原因之一。拒付不消耗令牌。</p>
+      <div class="deny-actions">
+        <button type="button" class="secondary" data-deny="over_budget">超额</button>
+        <button type="button" class="secondary" data-deny="merchant_not_allowed">商户不在白名单</button>
+        <button type="button" class="secondary" data-deny="expired">已过期</button>
+        <button type="button" class="secondary" data-deny="token_reused">令牌已用过</button>
+        <button type="button" class="secondary" data-deny="sku_not_allowed">商品不在范围</button>
+        <button type="button" class="secondary" id="reset">重置沙箱</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>最近一次结果</h2>
+      <div id="reason"></div>
+      <pre id="result" class="result">等待操作</pre>
+    </section>
+  </main>
+  <footer>支付宝沙箱。本页只签出收银台链接。submit-payment 尚未在这里执行，没有已完成的支付宝支付，也没有由此产生的报销草稿。金额单位为分。</footer>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
