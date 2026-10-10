@@ -11,7 +11,7 @@
     <div>
       <div class="stamp">SANDBOX</div>
       <h1>Agent Pay 办公文具采购</h1>
-      <p class="lede">用户设定预算、商户白名单和有效期后，办公 Agent 才能取得 300 秒单次支付令牌，按服务端目录价向文具演示商户付款，并把收据写入报销草稿。</p>
+      <p class="lede">用户保存预算、商户白名单和有效期，并亲自确认授权后，办公 Agent 才能取得 300 秒单次支付令牌。下单走商品 Agent Pay 的电脑网站支付，金额以服务端目录价为准，支付由用户通过支付宝完成。</p>
     </div>
     <div class="clock">
       <div>沙箱时间</div>
@@ -23,10 +23,18 @@
   <main class="layout">
     <section class="card">
       <h2>1. 授权</h2>
-      <p class="hint">未保存授权时不能签发令牌。令牌策略固定为 TTL 300 秒、单次使用。保存授权、签发令牌、设定时钟和重置沙箱需要与环境变量 ADMIN_TOKEN 一致的 Bearer。</p>
+      <p class="hint">管理令牌只能保存策略、签发令牌和查询订单。用户确认必须使用另一个 USER_TOKEN，不能只用 ADMIN_TOKEN。确认后可撤销，变更策略会使旧的未支付订单无法入账。</p>
       <form id="auth-form">
-        <label style="margin-bottom: 0.6rem">管理令牌 Admin token
-          <input id="admin-token" type="password" autocomplete="off" placeholder="与 ADMIN_TOKEN 相同" />
+        <div class="grid two" style="margin-bottom: 0.6rem">
+          <label>管理令牌 Admin token
+            <input id="admin-token" type="password" autocomplete="off" placeholder="ADMIN_TOKEN" />
+          </label>
+          <label>用户令牌 User token
+            <input id="user-token" type="password" autocomplete="off" placeholder="USER_TOKEN" />
+          </label>
+        </div>
+        <label style="margin-bottom: 0.6rem">授权主体 principal
+          <input id="principal" value="office-user-demo" autocomplete="off" />
         </label>
         <div class="grid">
           <label>单笔上限（分） per_order_cents
@@ -57,6 +65,8 @@
         </div>
         <div class="actions">
           <button type="submit">保存授权</button>
+          <button type="button" class="secondary" id="confirm-auth">用户确认授权</button>
+          <button type="button" class="secondary" id="revoke-auth">撤销确认</button>
           <button type="button" class="secondary" id="use-sample-time">沙箱时间设为 2026-10-09 10:00 +08</button>
         </div>
       </form>
@@ -65,7 +75,7 @@
 
     <section class="card">
       <h2>2. 支付令牌</h2>
-      <p class="hint">只有授权保存成功后，这里才会返回 token。TTL 300 秒，成功支付后即作废。</p>
+      <p class="hint">策略已保存且用户确认仍有效时，才能签发。TTL 300 秒，单次使用。创建收银台链接后令牌即作废。</p>
       <div class="actions">
         <button type="button" id="issue-token">签发支付令牌</button>
       </div>
@@ -74,7 +84,7 @@
 
     <section class="card">
       <h2>3. 沙箱下单</h2>
-      <p class="hint">通过后按官方 AI 按量付费协议返回 HTTP 402 和 Payment-Needed。成交金额只按目录单价计算，客户端申报的 amount_cents 不会进入账单。携带支付宝沙箱返回的 Payment-Proof 再次请求后，才会验付并写入报销草稿。</p>
+      <p class="hint">通过后调用 alipay.trade.page.pay，返回 pageRedirectionData。成交金额只按目录单价计算。请用官方 alipay-bot 压缩并推进支付，本页不代用户付款。支付完成后点「查询支付宝订单」写入报销草稿。</p>
       <div id="catalog" class="catalog"></div>
       <div class="grid two" style="margin-top: 0.8rem">
         <label>merchant_id
@@ -85,7 +95,8 @@
         </label>
       </div>
       <div class="actions">
-        <button type="button" id="pay">发起 402 支付账单</button>
+        <button type="button" id="pay">创建收银台链接</button>
+        <button type="button" class="secondary" id="confirm-trade">查询支付宝订单</button>
       </div>
     </section>
 
@@ -113,7 +124,7 @@
       <div id="drafts">还没有草稿</div>
     </section>
   </main>
-  <footer>官方 AI 按量付费沙箱。402 账单由商户私钥本地签名，验付走支付宝沙箱网关，不产生真实扣款。金额单位为分。</footer>
+  <footer>商品 Agent Pay 沙箱（电脑网站支付）。收银台链接由商户私钥本地签名，付款由用户通过 alipay-bot 完成。金额单位为分。</footer>
   <script type="module" src="/app.js"></script>
 </body>
 </html>

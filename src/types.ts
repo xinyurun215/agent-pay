@@ -75,6 +75,27 @@ export interface TokenRecord {
   ttl_seconds: 300;
   single_use: true;
   used: boolean;
+  confirmation_id: string;
+  scope_version: number;
+}
+
+/** User-side confirmation. ADMIN_TOKEN cannot create this record. */
+export interface UserConfirmation {
+  confirmation_id: string;
+  principal: string;
+  scope: Authorization;
+  scope_version: number;
+  confirmed_at: string;
+  revocable: true;
+  revoked_at: string | null;
+}
+
+export interface AuditEvent {
+  id: number;
+  at: string;
+  action: string;
+  principal: string | null;
+  detail: Record<string, unknown>;
 }
 
 export interface OrderRecord {

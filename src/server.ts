@@ -5,13 +5,14 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { AlipayExecutor } from "./a2m.js";
+import { createProductPayClient } from "./alipay-client.js";
 import { catalogView } from "./catalog.js";
 import { DenyError, HttpError } from "./errors.js";
-import { parseAuthorization, parseClock, parsePayCommand } from "./parse.js";
+import { parseAuthorization, parseClock, parsePayCommand, parsePrincipal } from "./parse.js";
+import type { ProductPayClient } from "./product-pay.js";
 import { createPurchaseApp, type PurchaseApp } from "./purchase.js";
 import { renderReceipt } from "./receipt.js";
-import type { A2MConfig } from "./sandbox-config.js";
+import type { SandboxConfig } from "./sandbox-config.js";
 import { DENY_REASONS } from "./types.js";
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "../public");
@@ -46,7 +47,7 @@ function requestBaseUrl(req: IncomingMessage): string {
   return `${proto}://${host}`;
 }
 
-async function readBody(req: IncomingMessage): Promise<unknown> {
+async function readRaw(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
@@ -57,21 +58,28 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
     }
     chunks.push(buffer);
   }
-  if (size === 0) {
-    return {};
-  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+function parseJsonBody(raw: string): unknown {
+  if (raw.length === 0) return {};
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return JSON.parse(raw) as unknown;
   } catch {
     throw new HttpError(400, "invalid_json", "Request body must be JSON");
   }
 }
 
+function parseForm(raw: string): Record<string, string> {
+  const params = new URLSearchParams(raw);
+  const fields: Record<string, string> = {};
+  for (const [key, value] of params) fields[key] = value;
+  return fields;
+}
+
 async function sendStatic(res: ServerResponse, pathname: string): Promise<boolean> {
   const entry = STATIC_FILES[pathname];
-  if (!entry) {
-    return false;
-  }
+  if (!entry) return false;
   const filePath = path.join(publicDir, entry.file);
   await access(filePath);
   res.writeHead(200, {
@@ -80,12 +88,6 @@ async function sendStatic(res: ServerResponse, pathname: string): Promise<boolea
   });
   createReadStream(filePath).pipe(res);
   return true;
-}
-
-export interface App {
-  server: Server;
-  purchase: PurchaseApp;
-  close(): void;
 }
 
 function bearerMatches(header: string | string[] | undefined, expected: string): boolean {
@@ -98,17 +100,43 @@ function bearerMatches(header: string | string[] | undefined, expected: string):
   return timingSafeEqual(presented, required);
 }
 
+export interface App {
+  server: Server;
+  purchase: PurchaseApp;
+  close(): void;
+}
+
 export function createApp(options: {
   databasePath: string;
-  config: A2MConfig | null;
-  alipay?: AlipayExecutor | null;
+  config: SandboxConfig | null;
+  productPay?: ProductPayClient | null;
   adminToken: string;
+  userToken: string;
 }): App {
-  const purchase = createPurchaseApp(options);
+  if (options.adminToken && options.userToken && options.adminToken === options.userToken) {
+    throw new Error("USER_TOKEN must be different from ADMIN_TOKEN");
+  }
+  const productPay =
+    options.productPay === undefined
+      ? options.config
+        ? createProductPayClient(options.config)
+        : null
+      : options.productPay;
+  const purchase = createPurchaseApp({
+    databasePath: options.databasePath,
+    config: options.config,
+    productPay,
+  });
 
   function requireAdmin(req: IncomingMessage): void {
     if (!bearerMatches(req.headers.authorization, options.adminToken)) {
       throw new HttpError(401, "unauthorized", "Admin bearer token is required");
+    }
+  }
+
+  function requireUser(req: IncomingMessage): void {
+    if (!bearerMatches(req.headers["x-user-authorization"], options.userToken)) {
+      throw new HttpError(401, "user_unauthorized", "User bearer token is required");
     }
   }
 
@@ -141,15 +169,14 @@ export function createApp(options: {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     const pathname = url.pathname;
 
-    if (method === "GET" && (await sendStatic(res, pathname))) {
-      return;
-    }
+    if (method === "GET" && (await sendStatic(res, pathname))) return;
 
     if (method === "GET" && pathname === "/health") {
       sendJson(res, 200, {
         ok: true,
         service: "agent-pay",
-        payment_rail: "alipay.aipay.agent",
+        payment_rail: "alipay.trade.page.pay",
+        product: "office-agent-pay",
         sandbox_configured: purchase.config !== null,
         deny_reasons: DENY_REASONS,
       });
@@ -161,21 +188,49 @@ export function createApp(options: {
       return;
     }
 
+    if (method === "GET" && pathname === "/authorization/defaults") {
+      sendJson(res, 200, { ok: true, defaults: purchase.authorizationView().defaults });
+      return;
+    }
+
     if (method === "GET" && pathname === "/authorization") {
+      requireAdmin(req);
       sendJson(res, 200, { ok: true, deny_reasons: DENY_REASONS, ...purchase.authorizationView() });
       return;
     }
 
-    if (method === "PUT" && pathname === "/authorization") {
-      const body = await readBody(req);
+    if (method === "GET" && pathname === "/authorization/audit") {
       requireAdmin(req);
-      const authorization = purchase.setAuthorization(parseAuthorization(body));
-      sendJson(res, 200, { ok: true, authorized: true, authorization });
+      sendJson(res, 200, { ok: true, audit: purchase.listAudit() });
+      return;
+    }
+
+    if (method === "PUT" && pathname === "/authorization") {
+      const body = parseJsonBody(await readRaw(req));
+      requireAdmin(req);
+      const saved = purchase.setAuthorization(parseAuthorization(body));
+      sendJson(res, 200, { ok: true, authorized: true, ...saved });
+      return;
+    }
+
+    if (method === "POST" && pathname === "/authorization/confirm") {
+      const body = parseJsonBody(await readRaw(req));
+      requireUser(req);
+      const confirmation = purchase.confirmAuthorization(parsePrincipal(body));
+      sendJson(res, 200, { ok: true, confirmation });
+      return;
+    }
+
+    if (method === "POST" && pathname === "/authorization/revoke") {
+      await readRaw(req);
+      requireUser(req);
+      const confirmation = purchase.revokeAuthorization();
+      sendJson(res, 200, { ok: true, confirmation });
       return;
     }
 
     if (method === "POST" && pathname === "/payment-tokens") {
-      await readBody(req);
+      await readRaw(req);
       requireAdmin(req);
       const token = purchase.issueToken();
       sendJson(res, 200, { ok: true, ...token });
@@ -184,35 +239,48 @@ export function createApp(options: {
 
     const tokenMatch = pathname.match(/^\/payment-tokens\/([^/]+)$/);
     if (method === "GET" && tokenMatch) {
+      requireAdmin(req);
       sendJson(res, 200, { ok: true, ...purchase.getToken(decodeURIComponent(tokenMatch[1])) });
       return;
     }
 
     if (method === "POST" && pathname === "/agent/purchase") {
-      const rawProof = req.headers["payment-proof"];
-      const proof = Array.isArray(rawProof) ? rawProof[0] : rawProof;
-      const baseUrl = requestBaseUrl(req);
-      if (proof && proof.trim() !== "") {
-        await readBody(req);
-        const verified = await purchase.verifyProof(proof, baseUrl);
-        const headers: Record<string, string> = {};
-        if (verified.status === 200) headers["Payment-Validation"] = verified.paymentValidation;
-        if (verified.status === 402 && verified.paymentNeeded) headers["Payment-Needed"] = verified.paymentNeeded;
-        sendJson(res, verified.status, verified.body, headers);
-        return;
-      }
-      const bill = purchase.createBill(parsePayCommand(await readBody(req)), baseUrl);
-      sendJson(res, 402, bill.body, { "Payment-Needed": bill.paymentNeeded });
+      const bill = purchase.createCashier(parsePayCommand(parseJsonBody(await readRaw(req))), requestBaseUrl(req));
+      sendJson(res, 200, bill);
+      return;
+    }
+
+    const confirmMatch = pathname.match(/^\/agent\/orders\/([^/]+)\/confirm$/);
+    if (method === "POST" && confirmMatch) {
+      await readRaw(req);
+      requireAdmin(req);
+      const confirmed = await purchase.confirmTrade(decodeURIComponent(confirmMatch[1]), requestBaseUrl(req));
+      sendJson(res, 200, confirmed);
+      return;
+    }
+
+    if (method === "POST" && pathname === "/alipay/notify") {
+      const fields = parseForm(await readRaw(req));
+      const result = await purchase.applyNotify(fields, requestBaseUrl(req));
+      const payload = Buffer.from(result);
+      res.writeHead(200, {
+        "content-type": "text/plain; charset=utf-8",
+        "cache-control": "no-store",
+        "content-length": payload.length,
+      });
+      res.end(payload);
       return;
     }
 
     if (method === "GET" && pathname === "/expense-drafts") {
+      requireAdmin(req);
       sendJson(res, 200, { ok: true, expense_drafts: purchase.listDrafts() });
       return;
     }
 
     const draftMatch = pathname.match(/^\/expense-drafts\/([^/]+)$/);
     if (method === "GET" && draftMatch) {
+      requireAdmin(req);
       sendJson(res, 200, {
         ok: true,
         expense_draft: purchase.getDraft(decodeURIComponent(draftMatch[1])),
@@ -222,6 +290,7 @@ export function createApp(options: {
 
     const orderMatch = pathname.match(/^\/orders\/([^/]+)$/);
     if (method === "GET" && orderMatch) {
+      requireAdmin(req);
       const order = purchase.getOrder(decodeURIComponent(orderMatch[1]));
       sendJson(res, 200, {
         ok: true,
@@ -232,6 +301,7 @@ export function createApp(options: {
           merchant_name: order.merchantName,
           receipt_url: order.receiptUrl,
           expense_draft_id: order.expenseDraftId,
+          request_fingerprint: order.requestFingerprint,
           lines: order.lines,
         },
       });
@@ -240,6 +310,7 @@ export function createApp(options: {
 
     const receiptMatch = pathname.match(/^\/receipts\/([^/]+)$/);
     if (method === "GET" && receiptMatch) {
+      requireAdmin(req);
       const order = purchase.getOrder(decodeURIComponent(receiptMatch[1]));
       const view = {
         order_id: order.outTradeNo,
@@ -271,7 +342,7 @@ export function createApp(options: {
     }
 
     if (method === "POST" && pathname === "/sandbox/clock") {
-      const body = await readBody(req);
+      const body = parseJsonBody(await readRaw(req));
       requireAdmin(req);
       const clock = parseClock(body);
       if ("reset" in clock) purchase.clock.reset();
@@ -281,7 +352,7 @@ export function createApp(options: {
     }
 
     if (method === "POST" && pathname === "/sandbox/reset") {
-      await readBody(req);
+      await readRaw(req);
       requireAdmin(req);
       purchase.reset();
       sendJson(res, 200, { ok: true, reset: true });

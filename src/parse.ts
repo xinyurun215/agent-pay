@@ -152,6 +152,18 @@ export function parsePayCommand(body: unknown): PayCommand {
   };
 }
 
+export function parsePrincipal(body: unknown): string {
+  const record = requireObject(body);
+  if (typeof record.principal !== "string") {
+    throw new HttpError(400, "invalid_principal", "principal is the user subject and is required");
+  }
+  const principal = record.principal.trim();
+  if (principal.length < 1 || principal.length > 120) {
+    throw new HttpError(400, "invalid_principal", "principal must be 1 to 120 characters");
+  }
+  return principal;
+}
+
 export function parseClock(body: unknown): { reset: true } | { now: string } {
   const record = requireObject(body);
   if (record.reset === true) {

@@ -1,10 +1,14 @@
 import { AlipaySdk } from "alipay-sdk";
 
-import type { AlipayExecutor } from "./a2m.js";
-import type { A2MConfig } from "./sandbox-config.js";
+import { PAGE_PAY_METHOD, type PagePayParams, type ProductPayClient } from "./product-pay.js";
+import type { SandboxConfig } from "./sandbox-config.js";
 
-/** Official `alipay-sdk` exec() wrapper. PKCS#1, sandbox gateway, no PEM framing added by us. */
-export function createAlipayExecutor(config: A2MConfig): AlipayExecutor {
+/**
+ * Demo client. `createPagePayUrl` is local SDK pageExecute (GET cashier URL).
+ * `queryTrade` calls alipay.trade.query on the sandbox gateway.
+ * This module is not a test double.
+ */
+export function createProductPayClient(config: SandboxConfig): ProductPayClient {
   const sdk = new AlipaySdk({
     appId: config.appId,
     privateKey: config.privateKey,
@@ -14,9 +18,21 @@ export function createAlipayExecutor(config: A2MConfig): AlipayExecutor {
     timeout: 30_000,
   });
   return {
-    async exec(method, params) {
-      const result = await sdk.exec(method, { bizContent: params.bizContent });
+    createPagePayUrl(params: PagePayParams): string {
+      return sdk.pageExecute(PAGE_PAY_METHOD, "GET", {
+        notifyUrl: params.notifyUrl,
+        returnUrl: params.returnUrl,
+        bizContent: params.bizContent,
+      });
+    },
+    async queryTrade(outTradeNo: string): Promise<Record<string, unknown>> {
+      const result = await sdk.exec("alipay.trade.query", {
+        bizContent: { out_trade_no: outTradeNo },
+      });
       return result as unknown as Record<string, unknown>;
+    },
+    checkNotifySign(postData: Record<string, string>): boolean {
+      return sdk.checkNotifySign(postData);
     },
   };
 }

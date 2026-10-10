@@ -3,23 +3,16 @@ import { readFileSync } from "node:fs";
 import { HttpError } from "./errors.js";
 import { MERCHANT_NAME } from "./types.js";
 
-/** Official quick-sandbox OpenAPI gateway from the alipay-aipay skill. */
+/** Alipay OpenAPI sandbox gateway. Production gateway.do is refused. */
 export const SANDBOX_GATEWAY = "https://openapi-sandbox.dl.alipaydev.com/gateway.do";
 
-/** Only legal service id for AI 按量付费 sandbox bills. Production must replace it. */
-export const SANDBOX_SERVICE_ID = "api_mock_service_id";
-
-/** Resource the agent purchases. Verification requires this exact id. */
-export const PURCHASE_RESOURCE_PATH = "/agent/purchase";
-
-export interface A2MConfig {
+export interface SandboxConfig {
   appId: string;
   /** PKCS#1 DER, base64, from `appIds[0].appPrivatePkcsKey`. No PEM framing. */
   privateKey: string;
   alipayPublicKey: string;
   gateway: string;
   sellerId: string;
-  serviceId: string;
   sellerName: string;
 }
 
@@ -31,10 +24,11 @@ function requiredString(value: unknown, field: string): string {
 }
 
 /**
- * Map the skill's `.alipay-sandbox.json` into the Node.js SDK fields.
+ * Map `.alipay-sandbox.json` into the Node.js SDK fields.
  * Non-Java runtimes use `appPrivatePkcsKey` (PKCS#1), not `appPrivateKey`.
+ * The gateway must stay on the sandbox host so this demo cannot charge production.
  */
-export function parseSandboxConfig(raw: unknown): A2MConfig {
+export function parseSandboxConfig(raw: unknown): SandboxConfig {
   if (typeof raw !== "object" || raw === null) {
     throw new HttpError(500, "sandbox_config_invalid", "Alipay sandbox config must be a JSON object");
   }
@@ -47,12 +41,11 @@ export function parseSandboxConfig(raw: unknown): A2MConfig {
     throw new HttpError(500, "sandbox_config_invalid", "Alipay sandbox config is missing appIds[0]");
   }
   const gateway = process.env.ALIPAY_GATEWAY?.trim() || SANDBOX_GATEWAY;
-  const serviceId = process.env.ALIPAY_SERVICE_ID?.trim() || SANDBOX_SERVICE_ID;
-  if (gateway !== SANDBOX_GATEWAY && serviceId === SANDBOX_SERVICE_ID) {
+  if (gateway !== SANDBOX_GATEWAY) {
     throw new HttpError(
       500,
-      "sandbox_service_id_not_for_production",
-      "api_mock_service_id is only valid with the Alipay sandbox gateway",
+      "production_gateway_refused",
+      "This demo only signs alipay.trade.page.pay against the Alipay sandbox gateway",
     );
   }
   return {
@@ -61,12 +54,11 @@ export function parseSandboxConfig(raw: unknown): A2MConfig {
     alipayPublicKey: requiredString(app.alipayPublicKey, "alipayPublicKey"),
     gateway,
     sellerId: requiredString(record.sandboxAccounts?.partner?.userId, "sandboxAccounts.partner.userId"),
-    serviceId,
     sellerName: MERCHANT_NAME,
   };
 }
 
-export function loadSandboxConfig(filePath: string): A2MConfig | null {
+export function loadSandboxConfig(filePath: string): SandboxConfig | null {
   let text: string;
   try {
     text = readFileSync(filePath, "utf8");

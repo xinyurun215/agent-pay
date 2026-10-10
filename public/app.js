@@ -9,25 +9,29 @@ const catalogEl = document.querySelector("#catalog");
 const authStateEl = document.querySelector("#auth-state");
 
 let currentToken = null;
+let lastOutTradeNo = null;
 let catalog = [];
 
-function decodeBase64Url(value) {
-  const padded = value + "=".repeat((4 - (value.length % 4)) % 4);
-  const normalized = padded.replace(/-/g, "+").replace(/_/g, "/");
-  const bytes = Uint8Array.from(atob(normalized), (char) => char.charCodeAt(0));
-  return new TextDecoder().decode(bytes);
-}
-
 const adminTokenEl = document.querySelector("#admin-token");
+const userTokenEl = document.querySelector("#user-token");
 const storedAdminToken = sessionStorage.getItem("agent-pay-admin-token");
+const storedUserToken = sessionStorage.getItem("agent-pay-user-token");
 if (storedAdminToken) adminTokenEl.value = storedAdminToken;
+if (storedUserToken) userTokenEl.value = storedUserToken;
 adminTokenEl.addEventListener("input", () => {
   sessionStorage.setItem("agent-pay-admin-token", adminTokenEl.value.trim());
 });
+userTokenEl.addEventListener("input", () => {
+  sessionStorage.setItem("agent-pay-user-token", userTokenEl.value.trim());
+});
 
-function adminHeaders() {
-  const token = adminTokenEl.value.trim();
-  return token ? { authorization: `Bearer ${token}` } : {};
+function authHeaders() {
+  const admin = adminTokenEl.value.trim();
+  const user = userTokenEl.value.trim();
+  return {
+    ...(admin ? { authorization: `Bearer ${admin}` } : {}),
+    ...(user ? { "x-user-authorization": `Bearer ${user}` } : {}),
+  };
 }
 
 async function api(path, options = {}) {
@@ -35,21 +39,12 @@ async function api(path, options = {}) {
     ...options,
     headers: {
       ...(options.body ? { "content-type": "application/json" } : {}),
-      ...adminHeaders(),
+      ...authHeaders(),
       ...(options.headers ?? {}),
     },
   });
   const body = await response.json();
-  const paymentNeeded = response.headers.get("payment-needed");
-  let payment_needed = null;
-  if (paymentNeeded) {
-    try {
-      payment_needed = JSON.parse(decodeBase64Url(paymentNeeded));
-    } catch {
-      payment_needed = null;
-    }
-  }
-  return { status: response.status, body, payment_needed };
+  return { status: response.status, body };
 }
 
 function show(payload, status) {
@@ -60,8 +55,8 @@ function show(payload, status) {
     badge.className = "reason";
     badge.textContent = reason;
     reasonEl.append(badge);
-  } else if (status === 402) {
-    reasonEl.innerHTML = `<span class="reason">Payment-Needed</span>`;
+  } else if (payload.page_redirection_data) {
+    reasonEl.innerHTML = `<span class="reason ok">page.pay</span>`;
   } else if (payload.ok) {
     reasonEl.innerHTML = `<span class="reason ok">ok ${status}</span>`;
   } else {
@@ -114,12 +109,25 @@ async function refreshClock() {
 }
 
 async function refreshAuth() {
-  const { body } = await api("/authorization");
-  const source = body.authorization ?? body.defaults;
-  fillAuthorization(source);
-  authStateEl.textContent = body.authorized
-    ? "授权已生效。可以签发支付令牌。"
-    : "授权尚未保存。保存后才能签发令牌。";
+  const defaults = await api("/authorization/defaults");
+  fillAuthorization(defaults.body.defaults);
+  if (!adminTokenEl.value.trim()) {
+    authStateEl.textContent = "填入管理令牌后可读取已保存策略。用户确认需要另一个用户令牌。";
+    return;
+  }
+  const { status, body } = await api("/authorization");
+  if (status !== 200) {
+    authStateEl.textContent = body.message ?? "无法读取授权";
+    return;
+  }
+  if (body.authorization) fillAuthorization(body.authorization);
+  const confirmation = body.confirmation;
+  const active = confirmation && !confirmation.revoked_at && confirmation.scope_version === body.scope_version;
+  authStateEl.textContent = active
+    ? `用户已确认。主体 ${confirmation.principal}，范围版本 ${confirmation.scope_version}，确认于 ${confirmation.confirmed_at}，可撤销。`
+    : body.authorized
+      ? `策略版本 ${body.scope_version} 已保存，等待用户确认后才能签发令牌。`
+      : "授权尚未保存。保存后由用户确认，才能签发令牌。";
 }
 
 function renderCatalog() {
@@ -178,11 +186,16 @@ async function refreshDrafts() {
       row.append(cell);
     }
     const linkCell = document.createElement("td");
-    const link = document.createElement("a");
-    link.href = draft.receipt_url;
+    const link = document.createElement("button");
+    link.type = "button";
+    link.className = "secondary";
     link.textContent = "打开收据";
-    link.target = "_blank";
-    link.rel = "noreferrer";
+    link.addEventListener("click", async () => {
+      const response = await fetch(draft.receipt_url, { headers: authHeaders() });
+      const html = await response.text();
+      const blob = new Blob([html], { type: "text/html" });
+      window.open(URL.createObjectURL(blob));
+    });
     linkCell.append(link);
     row.append(linkCell);
     tbody.append(row);
@@ -211,12 +224,23 @@ async function issueToken() {
   return body;
 }
 
+async function confirmUser() {
+  const { status, body } = await api("/authorization/confirm", {
+    method: "POST",
+    body: JSON.stringify({ principal: document.querySelector("#principal").value.trim() }),
+  });
+  show(body, status);
+  await refreshAuth();
+  return body;
+}
+
 async function payWith(payload) {
-  const { status, body, payment_needed } = await api("/agent/purchase", {
+  const { status, body } = await api("/agent/purchase", {
     method: "POST",
     body: JSON.stringify(payload),
   });
-  show({ http_status: status, ...body, payment_needed }, status);
+  if (body.out_trade_no) lastOutTradeNo = body.out_trade_no;
+  show({ http_status: status, ...body }, status);
   await refreshDrafts();
   if (currentToken) {
     const token = await api(`/payment-tokens/${encodeURIComponent(currentToken)}`);
@@ -224,7 +248,7 @@ async function payWith(payload) {
       tokenEl.textContent = `${token.body.token}\nused ${token.body.used} · single_use ${token.body.single_use}\nexpires ${token.body.expires_at}`;
     }
   }
-  return { status, body, payment_needed };
+  return { status, body };
 }
 
 async function prepareDemo() {
@@ -246,6 +270,7 @@ async function prepareDemo() {
       sku_keywords: ["签字笔", "A4纸", "文件夹"],
     }),
   });
+  await confirmUser();
   await refreshClock();
   await refreshAuth();
   await refreshDrafts();
@@ -265,7 +290,24 @@ document.querySelector("#use-sample-time").addEventListener("click", async () =>
   await refreshClock();
 });
 
+document.querySelector("#confirm-auth").addEventListener("click", () => confirmUser());
+document.querySelector("#revoke-auth").addEventListener("click", async () => {
+  const { status, body } = await api("/authorization/revoke", { method: "POST" });
+  show(body, status);
+  await refreshAuth();
+});
 document.querySelector("#issue-token").addEventListener("click", () => issueToken());
+document.querySelector("#confirm-trade").addEventListener("click", async () => {
+  if (!lastOutTradeNo) {
+    show({ ok: false, error: "order_required", message: "请先创建收银台链接" }, 400);
+    return;
+  }
+  const { status, body } = await api(`/agent/orders/${encodeURIComponent(lastOutTradeNo)}/confirm`, {
+    method: "POST",
+  });
+  show({ http_status: status, ...body }, status);
+  await refreshDrafts();
+});
 
 document.querySelector("#pay").addEventListener("click", async () => {
   if (!currentToken) {
@@ -342,7 +384,7 @@ const denyHandlers = {
       merchant_id: MERCHANT_ID,
       items: [{ sku_id: "sku-pen", quantity: 1 }],
     });
-    if (first.status !== 402) return;
+    if (first.status !== 200) return;
     await payWith({
       token: token.token,
       merchant_id: MERCHANT_ID,
@@ -379,4 +421,4 @@ catalog = loaded.body.skus;
 renderCatalog();
 await refreshClock();
 await refreshAuth();
-await refreshDrafts();
+if (adminTokenEl.value.trim()) await refreshDrafts();
