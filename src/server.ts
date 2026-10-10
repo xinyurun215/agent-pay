@@ -41,8 +41,12 @@ function sendJson(
   res.end(payload);
 }
 
-/** Absolute origin, optional path, no credentials, query, or hash. Empty means derive from the request. */
-export function resolvePublicBaseUrl(raw: string | undefined): string | null {
+/**
+ * Absolute origin, optional path, no credentials, query, or hash.
+ * Formal config passes `{ https: true }` and requires a public https origin.
+ * An empty value returns null so the local degraded mode can use the request host.
+ */
+export function resolvePublicBaseUrl(raw: string | undefined, options?: { https?: boolean }): string | null {
   const trimmed = raw?.trim() ?? "";
   if (!trimmed) return null;
   let url: URL;
@@ -50,6 +54,9 @@ export function resolvePublicBaseUrl(raw: string | undefined): string | null {
     url = new URL(trimmed);
   } catch {
     throw new Error("PUBLIC_BASE_URL must be an absolute http(s) URL");
+  }
+  if (options?.https && url.protocol !== "https:") {
+    throw new Error("PUBLIC_BASE_URL must be a public https origin");
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error("PUBLIC_BASE_URL must use http or https");
@@ -215,6 +222,7 @@ export function createApp(options: {
         payment_rail: "alipay.trade.page.pay",
         product: "office-agent-pay",
         sandbox_configured: purchase.config !== null,
+        settlement_mode: publicBaseUrl ? "public_notify" : "local_query",
         deny_reasons: DENY_REASONS,
       });
       return;

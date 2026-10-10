@@ -47,6 +47,12 @@ async function api(path, options = {}) {
   return { status: response.status, body };
 }
 
+function setStatus(step, kind, text) {
+  const el = document.querySelector(`#status-${step}`);
+  el.className = `step-status ${kind}`;
+  el.textContent = text;
+}
+
 function show(payload, status) {
   const reason = payload.deny_reason;
   if (reason) {
@@ -117,21 +123,28 @@ async function refreshAuth() {
   }
   if (!adminTokenEl.value.trim()) {
     authStateEl.textContent = "填入管理令牌后可读取已保存策略。用户确认需要另一个用户令牌。";
+    setStatus("auth", "wait", "未开始");
     return;
   }
   const { status, body } = await api("/authorization");
   if (status !== 200) {
     authStateEl.textContent = body.message ?? "无法读取授权";
+    setStatus("auth", "bad", "无法读取");
     return;
   }
   if (body.authorization) fillAuthorization(body.authorization);
   const confirmation = body.confirmation;
   const active = confirmation && !confirmation.revoked_at && confirmation.scope_version === body.scope_version;
-  authStateEl.textContent = active
-    ? `用户已确认。主体 ${confirmation.principal}，范围版本 ${confirmation.scope_version}，确认于 ${confirmation.confirmed_at}，可撤销。`
-    : body.authorized
-      ? `策略版本 ${body.scope_version} 已保存，等待用户确认后才能签发令牌。`
-      : "授权尚未保存。保存后由用户确认，才能签发令牌。";
+  if (active) {
+    authStateEl.textContent = `用户已确认。主体 ${confirmation.principal}，范围版本 ${confirmation.scope_version}，确认于 ${confirmation.confirmed_at}，可撤销。`;
+    setStatus("auth", "ok", "已确认");
+  } else if (body.authorized) {
+    authStateEl.textContent = `策略版本 ${body.scope_version} 已保存，等待用户确认后才能签发令牌。`;
+    setStatus("auth", "wait", "待用户确认");
+  } else {
+    authStateEl.textContent = "授权尚未保存。保存后由用户确认，才能签发令牌。";
+    setStatus("auth", "wait", "未保存");
+  }
 }
 
 function renderCatalog() {
@@ -149,7 +162,7 @@ function renderCatalog() {
     input.type = "number";
     input.min = "0";
     input.step = "1";
-    input.value = sku.sku_id === "sku-pen" ? "1" : "0";
+    input.value = sku.sku_id === "sku-pen-cent" ? "1" : "0";
     input.dataset.sku = sku.sku_id;
     input.setAttribute("aria-label", `${sku.name} 数量`);
     row.append(input);
@@ -169,9 +182,11 @@ async function refreshDrafts() {
   const { body } = await api("/expense-drafts");
   const drafts = body.expense_drafts ?? [];
   if (drafts.length === 0) {
-    draftsEl.textContent = "还没有草稿";
+    draftsEl.textContent = "待查询。还没有来自支付宝已支付交易的报销草稿。";
+    setStatus("receipt", "wait", "待查询");
     return;
   }
+  setStatus("receipt", "ok", "已有草稿");
   const table = document.createElement("table");
   table.innerHTML = "<thead><tr><th>草稿</th><th>订单</th><th>金额（分）</th><th>商户</th><th>支付时间</th><th>收据</th></tr></thead>";
   const tbody = document.createElement("tbody");
@@ -223,7 +238,8 @@ async function issueToken() {
   show(body, status);
   if (body.ok) {
     currentToken = body.token;
-    tokenEl.textContent = `${body.token}\nissued ${body.issued_at}\nexpires ${body.expires_at}\nttl ${body.ttl_seconds}s · single_use ${body.single_use}`;
+    tokenEl.textContent = `${body.token}\n签发 ${body.issued_at}\n到期 ${body.expires_at}\n有效 ${body.ttl_seconds} 秒，单次使用`;
+    setStatus("order", "wait", "已签发令牌");
   }
   return body;
 }
@@ -244,6 +260,14 @@ async function payWith(payload) {
     body: JSON.stringify(payload),
   });
   if (body.out_trade_no) lastOutTradeNo = body.out_trade_no;
+  if (body.page_redirection_data) {
+    document.querySelector("#cashier-url").textContent = body.page_redirection_data;
+    document.querySelector("#submit-command").textContent = body.alipay_bot?.submit_payment ?? "";
+    setStatus("order", "ok", `已定价 ${body.total_amount} 元`);
+    setStatus("cashier", "wait", "未执行支付");
+    setStatus("receipt", "wait", "待查询");
+  }
+  if (body.deny_reason) setStatus("deny", "bad", body.deny_reason);
   show({ http_status: status, ...body }, status);
   await refreshDrafts();
   if (currentToken) {
@@ -258,7 +282,9 @@ async function payWith(payload) {
 async function prepareDemo() {
   await api("/sandbox/reset", { method: "POST" });
   currentToken = null;
+  lastOutTradeNo = null;
   tokenEl.textContent = "尚未签发";
+  clearCashier();
   await api("/sandbox/clock", {
     method: "POST",
     body: JSON.stringify({ now: SAMPLE_NOW }),
@@ -333,10 +359,21 @@ document.querySelector("#pay").addEventListener("click", async () => {
   await payWith(payload);
 });
 
+function clearCashier() {
+  document.querySelector("#cashier-url").textContent = "下单成功后显示在这里。";
+  document.querySelector("#submit-command").textContent =
+    "alipay-bot submit-payment --session-id $AIPAY_SESSION_ID --payment-link '<原始 page.pay URL>' --intent-summary '服务内容：…，支付金额：¥…，支付对象：文具演示商户'";
+  setStatus("order", "wait", "未下单");
+  setStatus("cashier", "wait", "未执行支付");
+}
+
 document.querySelector("#reset").addEventListener("click", async () => {
   const { status, body } = await api("/sandbox/reset", { method: "POST" });
   currentToken = null;
+  lastOutTradeNo = null;
   tokenEl.textContent = "尚未签发";
+  clearCashier();
+  setStatus("deny", "wait", "未演示");
   show(body, status);
   await refreshClock();
   await refreshAuth();
@@ -423,6 +460,15 @@ for (const button of document.querySelectorAll("[data-deny]")) {
 const loaded = await api("/catalog");
 catalog = loaded.body.skus;
 renderCatalog();
+const health = await api("/health");
+const receiptMode = document.querySelector("#receipt-mode");
+if (health.body.settlement_mode === "local_query") {
+  receiptMode.textContent =
+    "本地降级模式：这台机器没有公网地址，不依赖支付宝异步通知。点「查询支付宝订单」会调用 alipay.trade.query。在返回已支付且金额、订单号都一致之前，报销草稿保持待查询。本页没有已完成的支付。";
+} else if (health.body.settlement_mode === "public_notify") {
+  receiptMode.textContent =
+    "正式配置：异步通知发到 PUBLIC_BASE_URL。也可以点「查询支付宝订单」主动核对。在支付宝返回已支付且金额、订单号都一致之前，报销草稿保持待查询。本页没有已完成的支付。";
+}
 await refreshClock();
 await refreshAuth();
 if (adminTokenEl.value.trim()) await refreshDrafts();

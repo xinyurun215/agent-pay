@@ -68,11 +68,50 @@ h2 {
   margin-bottom: 0.4rem;
 }
 
-.layout {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+.steps {
+  display: flex;
+  flex-direction: column;
   gap: 1rem;
   padding-bottom: 1rem;
+}
+
+.step-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.8rem;
+  margin-bottom: 0.6rem;
+}
+
+.step-head h2 { margin: 0; }
+
+.step-status {
+  flex: none;
+  font-size: 0.78rem;
+  padding: 0.15rem 0.45rem;
+  border: 1px solid var(--line);
+  background: white;
+}
+
+.step-status.wait { color: var(--muted); }
+.step-status.ok { color: var(--ok); border-color: #b7dfc6; background: var(--ok-soft); }
+.step-status.bad { color: var(--seal); border-color: #e7c4be; background: var(--seal-soft); }
+
+.label {
+  margin: 0.8rem 0 0.3rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.command {
+  margin: 0;
+  padding: 0.7rem;
+  background: #201c18;
+  color: #f6f1e8;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 0.78rem;
 }
 
 .card {
@@ -213,8 +252,7 @@ a { color: var(--seal); }
 footer { padding: 0.2rem 0 2rem; font-size: 0.85rem; }
 
 @media (max-width: 800px) {
-  .layout, .grid, .grid.two { grid-template-columns: 1fr; }
-  .span-2 { grid-column: auto; }
+  .grid, .grid.two { grid-template-columns: 1fr; }
   header { flex-direction: column; align-items: start; }
   .clock { text-align: left; }
   .sku { grid-template-columns: 1fr auto; }

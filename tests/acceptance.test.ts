@@ -246,6 +246,7 @@ test("health advertises product Agent Pay page.pay, not Machine Pay", async () =
   try {
     const health = await api(app.base, "/health");
     assert.equal(health.body.payment_rail, "alipay.trade.page.pay");
+    assert.equal(health.body.settlement_mode, "local_query");
     assert.equal(health.body.product, "office-agent-pay");
     assert.equal(JSON.stringify(health.body).includes("Payment-Needed"), false);
     assert.equal(JSON.stringify(health.body).includes("aipay.agent"), false);
@@ -501,6 +502,7 @@ test("page.pay uses the server catalog price and ignores the client amount", asy
 test("PUBLIC_BASE_URL is the notify and return origin", async () => {
   assert.equal(resolvePublicBaseUrl("https://pay.example.test/agent/"), "https://pay.example.test/agent");
   assert.throws(() => resolvePublicBaseUrl("https://user:secret@pay.example.test"), /PUBLIC_BASE_URL/);
+  assert.throws(() => resolvePublicBaseUrl("http://127.0.0.1:3000", { https: true }), /https/);
   const app = await start(new ScriptedTradeQuery(), PRINCIPAL, "https://pay.example.test/agent");
   try {
     await boot(app.base);
@@ -509,6 +511,7 @@ test("PUBLIC_BASE_URL is the notify and return origin", async () => {
     const page = new URL(cashier.body.page_redirection_data);
     assert.equal(page.searchParams.get("notify_url"), "https://pay.example.test/agent/alipay/notify");
     assert.equal(page.searchParams.get("return_url"), "https://pay.example.test/agent/");
+    assert.equal((await api(app.base, "/health")).body.settlement_mode, "public_notify");
   } finally {
     await app.close();
   }

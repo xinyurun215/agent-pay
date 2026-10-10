@@ -84,14 +84,26 @@ Node.js 22+.
 
 ```bash
 npm install
-ADMIN_TOKEN=choose-an-admin-secret USER_TOKEN=choose-a-different-user-secret npm start
+ADMIN_TOKEN=choose-an-admin-secret USER_TOKEN=choose-a-different-user-secret \
+  PUBLIC_BASE_URL=https://your-public-host.example npm start
 ```
 
-`DEMO_PRINCIPAL` is optional. Leave it unset to bind the user token to `demo:office-user`.
+`PUBLIC_BASE_URL` is required in this formal config. It must be a public `https` origin. Notify and return URLs are derived from it, not from the request `Host`. Alipay's async notify has to be able to reach that origin. `TRUST_PROXY=1` is only for a TLS terminator in front of that public origin.
 
-`PUBLIC_BASE_URL` is optional. When set to an absolute `http` or `https` URL, notify and return URLs use that origin instead of the request `Host`. `TRUST_PROXY=1` is what allows `X-Forwarded-Proto` when `PUBLIC_BASE_URL` is unset.
+`DEMO_PRINCIPAL` may be unset. The user token then binds to `demo:office-user`.
 
-Open http://127.0.0.1:3000. Paste the two secrets into the Admin token and User token fields. The page keeps them in this tab's sessionStorage. The principal line is filled from the server. There is no principal input.
+Open the process URL and paste the two secrets into the page. The page keeps them in this tab's sessionStorage. The principal line is filled from the server. There is no principal input.
+
+### 本地降级模式
+
+Use this only when the machine has no public HTTPS address, so Alipay cannot deliver `POST /alipay/notify`. Do not set `PUBLIC_BASE_URL`. Settlement is `POST /agent/orders/:id/confirm`, which calls `alipay.trade.query`. This path is separate from the formal config above.
+
+```bash
+ADMIN_TOKEN=choose-an-admin-secret USER_TOKEN=choose-a-different-user-secret \
+  LOCAL_DEGRADED=1 npm start
+```
+
+Open http://127.0.0.1:3000. The demo page labels this mode on the receipt step. A draft still appears only after a queried trade is paid and matches the stored order.
 
 `PUT /authorization`, `POST /payment-tokens`, `POST /sandbox/clock`, `POST /sandbox/reset`, `POST /agent/orders/:id/confirm`, and the sensitive reads (`GET /authorization`, `/authorization/audit`, `/payment-tokens/:token`, `/orders/:id`, `/expense-drafts`, `/receipts/:id`) return `401` without the admin bearer. An empty `ADMIN_TOKEN` rejects every one of those calls.
 

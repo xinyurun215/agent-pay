@@ -10,8 +10,8 @@
   <header>
     <div>
       <div class="stamp">SANDBOX</div>
-      <h1>Agent Pay 办公文具采购</h1>
-      <p class="lede">用户保存预算、商户白名单和有效期，并亲自确认授权后，办公 Agent 才能取得 300 秒单次支付令牌。下单走商品 Agent Pay 的电脑网站支付，金额以服务端目录价为准，支付由用户通过支付宝完成。</p>
+      <h1>办公文具采购</h1>
+      <p class="lede">按顺序走完五步：用户授权、下单、收银台交接、凭证回传、拒付演示。金额以服务端目录为准。本页不代付款，也不运行 alipay-bot。</p>
     </div>
     <div class="clock">
       <div>沙箱时间</div>
@@ -20,36 +20,39 @@
     </div>
   </header>
 
-  <main class="layout">
-    <section class="card">
-      <h2>1. 授权</h2>
-      <p class="hint">管理令牌只能保存策略、签发令牌和查询订单。用户确认必须使用另一个 USER_TOKEN，不能只用 ADMIN_TOKEN。确认后可撤销，变更策略会使旧的未支付订单无法入账。</p>
+  <main class="steps">
+    <section class="card" id="step-auth">
+      <div class="step-head">
+        <h2>1. 用户授权</h2>
+        <span class="step-status wait" id="status-auth">未开始</span>
+      </div>
+      <p class="hint">先保存预算、商户和有效期，再由用户本人确认。主体由服务端按 USER_TOKEN 绑定。管理令牌不能代替用户确认。</p>
       <form id="auth-form">
-        <div class="grid two" style="margin-bottom: 0.6rem">
-          <label>管理令牌 Admin token
+        <div class="grid two">
+          <label>管理令牌
             <input id="admin-token" type="password" autocomplete="off" placeholder="ADMIN_TOKEN" />
           </label>
-          <label>用户令牌 User token
+          <label>用户令牌
             <input id="user-token" type="password" autocomplete="off" placeholder="USER_TOKEN" />
           </label>
         </div>
-        <p id="principal-view" class="hint">授权主体由服务端按 USER_TOKEN 绑定，默认 demo:office-user。确认请求不能填写 principal。</p>
+        <p id="principal-view" class="hint">授权主体由服务端绑定，默认 demo:office-user。确认请求不能填写 principal。</p>
         <div class="grid">
-          <label>单笔上限（分） per_order_cents
+          <label>单笔上限（分）
             <input id="per-order" name="per_order_cents" type="number" min="0" step="1" required />
           </label>
-          <label>单日上限（分） daily_cents
+          <label>单日上限（分）
             <input id="daily" name="daily_cents" type="number" min="0" step="1" required />
           </label>
-          <label>总额上限（分） total_cents
+          <label>总额上限（分）
             <input id="total" name="total_cents" type="number" min="0" step="1" required />
           </label>
         </div>
         <div class="grid two" style="margin-top: 0.6rem">
-          <label>生效 valid_from
+          <label>生效时间
             <input id="valid-from" name="valid_from" required />
           </label>
-          <label>失效 valid_to
+          <label>失效时间
             <input id="valid-to" name="valid_to" required />
           </label>
         </div>
@@ -57,7 +60,7 @@
           <label>商户白名单
             <input id="whitelist" name="merchant_whitelist" required />
           </label>
-          <label>SKU 关键词（子串）
+          <label>商品关键词
             <input id="keywords" name="sku_keywords" required />
           </label>
         </div>
@@ -71,58 +74,77 @@
       <p id="auth-state" class="hint"></p>
     </section>
 
-    <section class="card">
-      <h2>2. 支付令牌</h2>
-      <p class="hint">策略已保存且用户确认仍有效时，才能签发。TTL 300 秒，单次使用。创建收银台链接后令牌即作废。</p>
+    <section class="card" id="step-order">
+      <div class="step-head">
+        <h2>2. 下单</h2>
+        <span class="step-status wait" id="status-order">未下单</span>
+      </div>
+      <p class="hint">先签发 300 秒单次令牌，再创建订单。成交价只按目录单价计算，客户端填写的金额不参与成交。通过后得到电脑网站支付的收银台链接。</p>
       <div class="actions">
         <button type="button" id="issue-token">签发支付令牌</button>
       </div>
       <p id="token-view" class="token">尚未签发</p>
-    </section>
-
-    <section class="card">
-      <h2>3. 沙箱下单</h2>
-      <p class="hint">通过后只生成 alipay.trade.page.pay 的 pageRedirectionData，成交金额按目录单价计算。本页不代用户付款，也没有跑通 alipay-bot submit-payment。查询支付宝订单只有在支付宝返回匹配的已支付交易时才会写入报销草稿。</p>
       <div id="catalog" class="catalog"></div>
       <div class="grid two" style="margin-top: 0.8rem">
-        <label>merchant_id
+        <label>商户编号
           <input id="merchant-id" value="stationery-demo-001" />
         </label>
-        <label>客户端申报 amount_cents（可选，不参与成交）
+        <label>客户端申报金额（分，不参与成交）
           <input id="client-amount" type="number" min="0" step="1" placeholder="留空则不申报" />
         </label>
       </div>
       <div class="actions">
-        <button type="button" id="pay">创建收银台链接</button>
-        <button type="button" class="secondary" id="confirm-trade">查询支付宝订单</button>
+        <button type="button" id="pay">创建订单并生成收银台链接</button>
       </div>
     </section>
 
-    <section class="card">
-      <h2>4. 拒付演练</h2>
-      <p class="hint">每个按钮会重置沙箱、写入默示授权，并返回下列原因码之一。</p>
+    <section class="card" id="step-cashier">
+      <div class="step-head">
+        <h2>3. 收银台交接</h2>
+        <span class="step-status wait" id="status-cashier">未执行支付</span>
+      </div>
+      <p class="hint">下面是原始 page.pay 链接，以及官方交接命令。session-id 必须是沙箱登录得到的 UUID，写在环境变量 AIPAY_SESSION_ID 里。本页不运行这条命令，也不代用户付款。</p>
+      <p class="label">原始收银台链接</p>
+      <pre id="cashier-url" class="command">下单成功后显示在这里。</pre>
+      <p class="label">官方命令</p>
+      <pre id="submit-command" class="command">alipay-bot submit-payment --session-id $AIPAY_SESSION_ID --payment-link '&lt;原始 page.pay URL&gt;' --intent-summary '服务内容：…，支付金额：¥…，支付对象：文具演示商户'</pre>
+    </section>
+
+    <section class="card" id="step-receipt">
+      <div class="step-head">
+        <h2>4. 凭证回传</h2>
+        <span class="step-status wait" id="status-receipt">待查询</span>
+      </div>
+      <p id="receipt-mode" class="hint">报销草稿保持待查询，直到支付宝返回一笔金额和订单号都对得上的已支付交易。测试替身不算这笔交易。</p>
+      <div class="actions">
+        <button type="button" class="secondary" id="confirm-trade">查询支付宝订单</button>
+      </div>
+      <div id="drafts">待查询。还没有来自支付宝已支付交易的报销草稿。</div>
+    </section>
+
+    <section class="card" id="step-deny">
+      <div class="step-head">
+        <h2>5. 拒付演示</h2>
+        <span class="step-status wait" id="status-deny">未演示</span>
+      </div>
+      <p class="hint">每个按钮会重置沙箱、写入默认授权并让用户确认，然后返回下列原因之一。拒付不消耗令牌。</p>
       <div class="deny-actions">
-        <button type="button" class="secondary" data-deny="over_budget">超额 over_budget</button>
-        <button type="button" class="secondary" data-deny="merchant_not_allowed">非白名单 merchant_not_allowed</button>
-        <button type="button" class="secondary" data-deny="expired">过期 expired</button>
-        <button type="button" class="secondary" data-deny="token_reused">复用 token_reused</button>
-        <button type="button" class="secondary" data-deny="sku_not_allowed">非文具 sku_not_allowed</button>
+        <button type="button" class="secondary" data-deny="over_budget">超额</button>
+        <button type="button" class="secondary" data-deny="merchant_not_allowed">商户不在白名单</button>
+        <button type="button" class="secondary" data-deny="expired">已过期</button>
+        <button type="button" class="secondary" data-deny="token_reused">令牌已用过</button>
+        <button type="button" class="secondary" data-deny="sku_not_allowed">商品不在范围</button>
         <button type="button" class="secondary" id="reset">重置沙箱</button>
       </div>
     </section>
 
-    <section class="card span-2">
+    <section class="card">
       <h2>最近一次结果</h2>
       <div id="reason"></div>
       <pre id="result" class="result">等待操作</pre>
     </section>
-
-    <section class="card span-2">
-      <h2>报销草稿</h2>
-      <div id="drafts">还没有草稿</div>
-    </section>
   </main>
-  <footer>商品 Agent Pay 沙箱（电脑网站支付）。这里只本地签出收银台链接。真实支付要另行运行 alipay-bot，当前验收没有跑完那一步。金额单位为分。</footer>
+  <footer>支付宝沙箱。本页只签出收银台链接。submit-payment 尚未在这里执行，没有已完成的支付宝支付，也没有由此产生的报销草稿。金额单位为分。</footer>
   <script type="module" src="/app.js"></script>
 </body>
 </html>
