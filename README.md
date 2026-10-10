@@ -82,6 +82,19 @@ Follow the skill's sandbox setup so `.alipay-sandbox.json` exists beside this pr
 
 Node.js 22+.
 
+### 一键演示
+
+本地演示用这一条。`npm run demo` 在有 `.env` 时读它，否则读 `.env.example`。示例是 `LOCAL_DEGRADED=1`，不设 `PUBLIC_BASE_URL`。两个令牌必须不同，且不要写生产密钥。
+
+```bash
+cp .env.example .env
+npm run demo
+```
+
+不改令牌时可以不复制，直接 `npm run demo`。浏览器打开 http://127.0.0.1:3000 ，把该文件里的 `ADMIN_TOKEN` 和 `USER_TOKEN` 填进页面。
+
+正式配置仍要公网 `https` 的 `PUBLIC_BASE_URL`，并且不能同时设 `LOCAL_DEGRADED=1`：
+
 ```bash
 npm install
 ADMIN_TOKEN=choose-an-admin-secret USER_TOKEN=choose-a-different-user-secret \

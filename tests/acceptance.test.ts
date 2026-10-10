@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -971,6 +971,23 @@ test("over-budget plan is not rewritten into a cheaper order", async () => {
   } finally {
     await app.close();
   }
+});
+
+test("demo env example is local degraded and leaves PUBLIC_BASE_URL unset", () => {
+  const entries = new Map<string, string>();
+  const text = readFileSync(new URL("../.env.example", import.meta.url), "utf8");
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    entries.set(trimmed.slice(0, eq), trimmed.slice(eq + 1));
+  }
+  assert.equal(entries.get("LOCAL_DEGRADED"), "1");
+  assert.equal(entries.has("PUBLIC_BASE_URL"), false);
+  assert.equal(entries.has("ADMIN_TOKEN"), true);
+  assert.equal(entries.has("USER_TOKEN"), true);
+  assert.notEqual(entries.get("ADMIN_TOKEN"), entries.get("USER_TOKEN"));
+  assert.equal(entries.get("DEMO_PRINCIPAL"), "demo:office-user");
 });
 
 test("sandbox config maps the Node.js PKCS#1 field and refuses a non-sandbox gateway", () => {
