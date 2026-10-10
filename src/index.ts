@@ -1,7 +1,7 @@
 import path from "node:path";
 
 import { loadSandboxConfig } from "./sandbox-config.js";
-import { createApp } from "./server.js";
+import { createApp, resolvePublicBaseUrl } from "./server.js";
 
 const port = Number(process.env.PORT ?? "3000");
 const host = process.env.HOST ?? "127.0.0.1";
@@ -16,6 +16,8 @@ const { server } = createApp({
   adminToken: process.env.ADMIN_TOKEN ?? "",
   userToken: process.env.USER_TOKEN ?? "",
   demoPrincipal: process.env.DEMO_PRINCIPAL,
+  publicBaseUrl: resolvePublicBaseUrl(process.env.PUBLIC_BASE_URL),
+  trustProxy: process.env.TRUST_PROXY === "1",
 });
 server.listen(port, host, () => {
   console.log(`Agent Pay sandbox listening on http://${host}:${port}`);

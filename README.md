@@ -7,7 +7,7 @@ This demo is **商品 Agent Pay** (办公智能体支付) on the PC merchant pat
 - https://aipay.alipay.com/docs/agent-pay/skillpay.html
 - https://aipay.alipay.com/products/office-agent-pay.md
 
-Checkout calls `alipay.trade.page.pay` (`product_code=FAST_INSTANT_TRADE_PAY`) through `alipay-sdk` `pageExecute` GET. The response body is `pageRedirectionData`, a sandbox cashier URL. The official next commands are `alipay-bot trigger-payment-signal` and `alipay-bot submit-payment`. This service does not run those commands and does not pay on the user's behalf.
+Checkout calls `alipay.trade.page.pay` (`product_code=FAST_INSTANT_TRADE_PAY`) through `alipay-sdk` `pageExecute` GET. The response body is `pageRedirectionData`, a sandbox cashier URL. The official cashier command is `alipay-bot submit-payment` with that original URL, a UUID `--session-id`, and `--intent-summary`. `query-payment-status` is used only with a credential from that submit output. This service does not run those commands and does not pay on the user's behalf.
 
 What this repo has verified is the signed cashier URL, plus local tests that simulate `alipay.trade.query` and the async notify. `alipay-bot submit-payment` has not been run, so there is no completed sandbox payment and no expense draft produced by a live Alipay trade.
 
@@ -59,10 +59,24 @@ Confirmation, audit events, and orders store that server principal. `ADMIN_TOKEN
 ## Install the official skill
 
 ```bash
-npx -y @alipay/agent-payment@latest install
+npx -y @alipay/agent-payment@1.0.26 install
 ```
 
-That installs the 商品 / 办公 Agent Pay skill and the `alipay-bot` command. Follow the skill's sandbox setup so `.alipay-sandbox.json` exists beside this project (mode `0600`, gitignored). Node reads `appPrivatePkcsKey` (PKCS#1). Do not add PEM headers. Do not paste private keys, buyer passwords, or notify payloads into the README, logs, or commits.
+Pinned package integrity:
+
+```text
+sha512-Kpg3oO8O06Y7ZN8Ue9RFTgN7GReYZezYjG+KQYrenfdddJqk5pMod9noZH8vp2OrI/VHvwJbkDGf9/0cLi5zkQ==
+```
+
+That install is expected to place `alipay-bot-cli` `0.4.5` for `linux-amd64`. `scripts/sandbox-evidence.mjs` checks the binary before spawning it:
+
+```text
+sha256 71c8d8b0dd8d11e827f2ee8687dcea60c42ac708e901a3acd940bc36bf60c42c
+```
+
+A different hash or version stops the evidence script. The script's child process receives an allowlisted environment (`PATH`, `HOME`, locale, TLS, proxy, `AIPAY_SESSION_ID`, `AIPAY_OUTPUT_CHANNEL` when already set). It does not receive `ADMIN_TOKEN` or `USER_TOKEN`.
+
+Follow the skill's sandbox setup so `.alipay-sandbox.json` exists beside this project (mode `0600`, gitignored). Node reads `appPrivatePkcsKey` (PKCS#1). Do not add PEM headers. Do not paste private keys, buyer passwords, or notify payloads into the README, logs, or commits.
 
 ## Run
 
@@ -74,6 +88,8 @@ ADMIN_TOKEN=choose-an-admin-secret USER_TOKEN=choose-a-different-user-secret npm
 ```
 
 `DEMO_PRINCIPAL` is optional. Leave it unset to bind the user token to `demo:office-user`.
+
+`PUBLIC_BASE_URL` is optional. When set to an absolute `http` or `https` URL, notify and return URLs use that origin instead of the request `Host`. `TRUST_PROXY=1` is what allows `X-Forwarded-Proto` when `PUBLIC_BASE_URL` is unset.
 
 Open http://127.0.0.1:3000. Paste the two secrets into the Admin token and User token fields. The page keeps them in this tab's sessionStorage. The principal line is filled from the server. There is no principal input.
 
@@ -135,18 +151,16 @@ Before the policy is saved, token issuance returns `403` `authorization_required
 
 The purchase response is HTTP 200. For one `sku-pen`, `total_amount` is `8.00` and `amount_cents` is `800`, not a client-supplied `1`. For one `sku-pen-cent`, `total_amount` is `0.01`. `page_redirection_data` is the cashier URL (`method=alipay.trade.page.pay`). A second purchase with the same token returns `token_reused`. No expense draft exists yet.
 
-The official handoff is below. This repository's recorded verification has not run it. `scripts/sandbox-evidence.mjs` is the sandbox-only way to run it and keep the outputs on disk.
+The official cashier handoff uses the original `page_redirection_data` as `--payment-link`. `--session-id` must be a UUID from `AIPAY_SESSION_ID`, or a framework conversation id that is already a UUID. The evidence script stops when neither exists. It does not invent `session-xxx` or a timestamp.
 
 ```bash
-alipay-bot trigger-payment-signal \
-  --payment-link "<page_redirection_data>" \
-  --merchant-info "<文具演示商户，商品名称，金额（元）>" \
-  --amount "<total_amount>"
-
 alipay-bot submit-payment \
-  --payment-link "<short link from trigger-payment-signal>" \
-  --intent-summary "<文具演示商户，商品名称，金额（元）>"
+  --session-id "<uuid>" \
+  --payment-link "<page_redirection_data>" \
+  --intent-summary "服务内容：<subject>，支付金额：¥<total_amount>，支付对象：文具演示商户"
 ```
+
+If that output is pending and includes `outShakeNo` or `shortUrl` from this run, the next command is `alipay-bot query-payment-status`. The original cashier URL is not a query credential.
 
 `POST /agent/orders/<out_trade_no>/confirm` then calls `alipay.trade.query`. A draft is written only when that response, or a signed notify, reports a matching paid trade. Automated tests stub that response. They do not pay at the sandbox cashier. A second confirm of a draft that was already written returns the same draft.
 
@@ -160,23 +174,25 @@ Saving the policy again bumps `scope_version`, revokes the confirmation, and mak
 
 ## Sandbox evidence path
 
-`scripts/sandbox-evidence.mjs` is a local sandbox cashier walkthrough for one `sku-pen-cent` (`0.01` CNY). It checks that `.alipay-sandbox.json` exists and that this server's health reports the sandbox page.pay rail, then saves the policy, confirms with an empty body, creates the cashier URL, and runs `alipay-bot trigger-payment-signal` and `alipay-bot submit-payment`. It then calls `POST /agent/orders/:id/confirm` and writes:
+`scripts/sandbox-evidence.mjs` is a local sandbox cashier walkthrough for one `sku-pen-cent` (`0.01` CNY). It checks `.alipay-sandbox.json`, the pinned `alipay-bot` hash, and a UUID session id, then saves the policy, confirms with an empty body, and creates the cashier URL. The first bot command is `submit-payment` with that URL. `query-payment-status` runs only when this submit output includes a query credential. A completed CLI result is then read with `POST /agent/orders/:id/confirm`. Outputs:
 
 ```text
 artifacts/sandbox/<timestamp>/
   cashier-url.txt
   purchase.json
-  trigger-payment-signal.json
   submit-payment.json
+  query-payment-status.json
   trade-query.json
   expense-draft.json
   manifest.json
 ```
 
+A blocked run still writes `manifest.json` with `real_funds: false` and `blocked: true`. Daily and total budget are read and the order row is reserved in the same SQLite write transaction, so a second connection cannot reserve past the remaining budget.
+
 `artifacts/` is gitignored. The cashier file is a signed sandbox URL. Keep it local.
 
 ```bash
-ADMIN_TOKEN=... USER_TOKEN=... node scripts/sandbox-evidence.mjs
+ADMIN_TOKEN=... USER_TOKEN=... AIPAY_SESSION_ID=<uuid> node scripts/sandbox-evidence.mjs
 ```
 
 The server must already be listening, started with the same two tokens. The script refuses to continue when `ALIPAY_GATEWAY` is set to anything other than the sandbox gateway. A successful run is sandbox cashier evidence for 1 fen. It is not a production charge and it is not evidence that real funds moved. This repository's current verification has not run the script, so the default statement stands: `alipay-bot submit-payment` has not been run here.
@@ -272,6 +288,6 @@ Denied purchases respond with HTTP 403:
 
 ## Not verified
 
-- `alipay-bot trigger-payment-signal` and `alipay-bot submit-payment` were not run for this revision, and `scripts/sandbox-evidence.mjs` was not executed. There is no sandbox cashier evidence directory in this verification, no completed Agent Pay payment loop, and no expense draft produced by Alipay. Running that script later would record sandbox cashier evidence only. It would not show a real-fund deduction.
+- `scripts/sandbox-evidence.mjs` is the sandbox cashier path. Until that script records a completed `submit-payment`, there is no sandbox payment evidence and no expense draft produced by Alipay. A completed run would still be sandbox cashier evidence for 1 fen, not a real-fund deduction.
 - APP `alipay.trade.order.prepay` is deferred and not wired.
 - A live notify delivery needs a URL Alipay can reach. After an authorization change, a signed notify for the old unpaid order is answered `success` and writes no draft.

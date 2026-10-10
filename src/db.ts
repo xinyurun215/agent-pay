@@ -364,9 +364,49 @@ export class AgentPayDatabase {
     return { daily, total };
   }
 
-  consumeTokenAndCreateOrder(token: string, order: OrderInsert): void {
+  /**
+   * Read remaining daily/total budget and reserve the order in one write transaction.
+   * A deny rolls back, so the token stays unused and no row is reserved.
+   */
+  consumeTokenAndCreateOrder(
+    token: string,
+    order: OrderInsert,
+    reservation: { now: Date; perOrderCents: number; dailyCents: number; totalCents: number },
+  ): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const spent = this.spentCents(reservation.now, order.scopeVersion);
+      if (order.amountCents > reservation.perOrderCents) {
+        throw new DenyError(
+          "over_budget",
+          `Order amount ${order.amountCents} cents exceeds per_order_cents ${reservation.perOrderCents}`,
+          { limit: "per_order", amount_cents: order.amountCents, limit_cents: reservation.perOrderCents },
+        );
+      }
+      if (spent.daily + order.amountCents > reservation.dailyCents) {
+        throw new DenyError(
+          "over_budget",
+          `Order amount ${order.amountCents} cents plus today's spend ${spent.daily} exceeds daily_cents ${reservation.dailyCents}`,
+          {
+            limit: "daily",
+            amount_cents: order.amountCents,
+            spent_cents: spent.daily,
+            limit_cents: reservation.dailyCents,
+          },
+        );
+      }
+      if (spent.total + order.amountCents > reservation.totalCents) {
+        throw new DenyError(
+          "over_budget",
+          `Order amount ${order.amountCents} cents plus total spend ${spent.total} exceeds total_cents ${reservation.totalCents}`,
+          {
+            limit: "total",
+            amount_cents: order.amountCents,
+            spent_cents: spent.total,
+            limit_cents: reservation.totalCents,
+          },
+        );
+      }
       const updated = this.db
         .prepare("UPDATE payment_tokens SET used = 1 WHERE token = ? AND used = 0")
         .run(token);

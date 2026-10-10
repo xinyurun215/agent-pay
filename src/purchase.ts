@@ -88,8 +88,8 @@ export interface CashierBody {
   confirmation_id: string;
   principal: string;
   alipay_bot: {
-    trigger_payment_signal: string;
     submit_payment: string;
+    query_payment_status: string;
   };
 }
 
@@ -150,12 +150,19 @@ function requestFingerprint(input: {
   return createHash("sha256").update(JSON.stringify(input)).digest("hex");
 }
 
-function botCommands(pageRedirectionData: string, merchantInfo: string, amount: string): CashierBody["alipay_bot"] {
+export function cashierIntentSummary(subject: string, amountYuan: string, payee: string): string {
+  return `服务内容：${subject}，支付金额：¥${amountYuan}，支付对象：${payee}`;
+}
+
+function botCommands(pageRedirectionData: string, intentSummary: string): CashierBody["alipay_bot"] {
   return {
-    trigger_payment_signal: `alipay-bot trigger-payment-signal --payment-link ${JSON.stringify(pageRedirectionData)} --merchant-info ${JSON.stringify(merchantInfo)} --amount ${JSON.stringify(amount)}`,
     submit_payment:
-      "alipay-bot submit-payment --payment-link <short link printed by trigger-payment-signal> --intent-summary " +
-      JSON.stringify(merchantInfo),
+      "alipay-bot submit-payment --session-id <AIPAY_SESSION_ID> --payment-link " +
+      JSON.stringify(pageRedirectionData) +
+      " --intent-summary " +
+      JSON.stringify(intentSummary),
+    query_payment_status:
+      "alipay-bot query-payment-status --out-shake-no <outShakeNo from this submit-payment>",
   };
 }
 
@@ -524,29 +531,38 @@ export function createPurchaseApp(options: {
         amountCents: priced.amountCents,
         subject: priced.subject,
       });
-      database.consumeTokenAndCreateOrder(command.token, {
-        outTradeNo,
-        amount: priced.amount,
-        amountCents: priced.amountCents,
-        subject: priced.subject,
-        productCode: PAGE_PAY_PRODUCT_CODE,
-        goodsName: priced.goodsName,
-        timeExpire,
-        timeExpireMs: expireAt.getTime(),
-        merchantId: command.merchant_id,
-        merchantName: MERCHANT_NAME,
-        lines: priced.lines,
-        ignoredClientAmountCents: command.client_amount_cents,
-        paymentToken: command.token,
-        pageRedirectionData,
-        requestFingerprint: fingerprint,
-        scopeVersion: current.scopeVersion,
-        confirmationId: confirmation.confirmation_id,
-        principal: confirmation.principal,
-        spendDay: shanghaiDate(now),
-        createdAt: now.toISOString(),
-      });
-      const merchantInfo = `${MERCHANT_NAME}，${priced.subject}，${priced.amount}元`;
+      database.consumeTokenAndCreateOrder(
+        command.token,
+        {
+          outTradeNo,
+          amount: priced.amount,
+          amountCents: priced.amountCents,
+          subject: priced.subject,
+          productCode: PAGE_PAY_PRODUCT_CODE,
+          goodsName: priced.goodsName,
+          timeExpire,
+          timeExpireMs: expireAt.getTime(),
+          merchantId: command.merchant_id,
+          merchantName: MERCHANT_NAME,
+          lines: priced.lines,
+          ignoredClientAmountCents: command.client_amount_cents,
+          paymentToken: command.token,
+          pageRedirectionData,
+          requestFingerprint: fingerprint,
+          scopeVersion: current.scopeVersion,
+          confirmationId: confirmation.confirmation_id,
+          principal: confirmation.principal,
+          spendDay: shanghaiDate(now),
+          createdAt: now.toISOString(),
+        },
+        {
+          now,
+          perOrderCents: current.authorization.budget.per_order_cents,
+          dailyCents: current.authorization.budget.daily_cents,
+          totalCents: current.authorization.budget.total_cents,
+        },
+      );
+      const intentSummary = cashierIntentSummary(priced.subject, priced.amount, MERCHANT_NAME);
       audit("order_created", confirmation.principal, {
         out_trade_no: outTradeNo,
         amount_cents: priced.amountCents,
@@ -568,7 +584,7 @@ export function createPurchaseApp(options: {
         scope_version: current.scopeVersion,
         confirmation_id: confirmation.confirmation_id,
         principal: confirmation.principal,
-        alipay_bot: botCommands(pageRedirectionData, merchantInfo, priced.amount),
+        alipay_bot: botCommands(pageRedirectionData, intentSummary),
       };
     },
     async confirmTrade(outTradeNo, baseUrl) {

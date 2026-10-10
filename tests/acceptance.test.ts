@@ -8,8 +8,13 @@ import test from "node:test";
 
 import { AlipaySdk } from "alipay-sdk";
 
+import { AgentPayDatabase } from "../src/db.js";
+import { DenyError } from "../src/errors.js";
 import type { ProductPayClient } from "../src/product-pay.js";
-import { createApp, type App } from "../src/server.js";
+import { cashierIntentSummary } from "../src/purchase.js";
+import { createApp, resolvePublicBaseUrl, type App } from "../src/server.js";
+import { shanghaiDate } from "../src/time.js";
+import { botEnv, resolveSessionId } from "../scripts/sandbox-evidence.mjs";
 import { parseSandboxConfig, SANDBOX_GATEWAY, type SandboxConfig } from "../src/sandbox-config.js";
 import { DEFAULT_DEMO_PRINCIPAL, resolveDemoPrincipal } from "../src/principal.js";
 import { DENY_REASONS, MERCHANT_ID } from "../src/types.js";
@@ -106,6 +111,7 @@ function testClient(config: SandboxConfig, script: ScriptedTradeQuery): ProductP
 async function start(
   script = new ScriptedTradeQuery(),
   demoPrincipal = PRINCIPAL,
+  publicBaseUrl: string | null = null,
 ): Promise<{
   base: string;
   script: ScriptedTradeQuery;
@@ -121,6 +127,7 @@ async function start(
     adminToken: ADMIN_TOKEN,
     userToken: USER_TOKEN,
     demoPrincipal,
+    publicBaseUrl,
   });
   await new Promise<void>((resolve) => {
     app.server.listen(0, "127.0.0.1", () => resolve());
@@ -358,6 +365,95 @@ test("confirm binds DEMO_PRINCIPAL and rejects a client principal", async () => 
   }
 });
 
+test("alipay-bot spawn env is allowlisted and session id must already be a UUID", () => {
+  const env = botEnv({
+    PATH: "/usr/bin",
+    HOME: "/home/demo",
+    ADMIN_TOKEN: "secret-admin",
+    USER_TOKEN: "secret-user",
+    AIPAY_OUTPUT_CHANNEL: "feishu",
+  });
+  assert.equal(env.PATH, "/usr/bin");
+  assert.equal(env.HOME, "/home/demo");
+  assert.equal(env.AIPAY_OUTPUT_CHANNEL, "feishu");
+  assert.equal("ADMIN_TOKEN" in env, false);
+  assert.equal("USER_TOKEN" in env, false);
+  assert.equal(resolveSessionId({ AIPAY_SESSION_ID: "11111111-1111-4111-8111-111111111111" }), "11111111-1111-4111-8111-111111111111");
+  assert.equal(
+    resolveSessionId({ CURSOR_CONVERSATION_ID: "22222222-2222-4222-8222-222222222222" }),
+    "22222222-2222-4222-8222-222222222222",
+  );
+  assert.throws(() => resolveSessionId({ AIPAY_SESSION_ID: "session-123" }), /UUID/);
+  assert.throws(() => resolveSessionId({ CURSOR_CONVERSATION_ID: "bc-22222222-2222-4222-8222-222222222222" }), /UUID/);
+  assert.throws(() => resolveSessionId({}), /AIPAY_SESSION_ID/);
+});
+
+test("budget spent and order reserve share one transaction across connections", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "agent-pay-budget-"));
+  const file = path.join(directory, "agent-pay.sqlite");
+  const first = new AgentPayDatabase(file);
+  const second = new AgentPayDatabase(file);
+  const now = new Date("2026-10-09T02:00:00.000Z");
+  const reservation = { now, perOrderCents: 50_000, dailyCents: 800, totalCents: 500_000 };
+  const insert = (token: string) => {
+    const db = token.endsWith("a") ? first : second;
+    db.insertToken({
+      token,
+      issued_at: now.toISOString(),
+      expires_at: new Date(now.getTime() + 300_000).toISOString(),
+      ttl_seconds: 300,
+      single_use: true,
+      used: false,
+      confirmation_id: "confirm_budget",
+      scope_version: 1,
+    });
+  };
+  insert("paytok_a");
+  insert("paytok_b");
+  const order = (outTradeNo: string, paymentToken: string) => ({
+    outTradeNo,
+    amount: "8.00",
+    amountCents: 800,
+    subject: "黑色签字笔x1",
+    productCode: "FAST_INSTANT_TRADE_PAY",
+    goodsName: "黑色签字笔x1",
+    timeExpire: "2026-10-09 10:30:00",
+    timeExpireMs: now.getTime() + 30 * 60 * 1000,
+    merchantId: MERCHANT_ID,
+    merchantName: "文具演示商户",
+    lines: [],
+    ignoredClientAmountCents: null,
+    paymentToken,
+    pageRedirectionData: "https://example.test/cashier",
+    requestFingerprint: outTradeNo,
+    scopeVersion: 1,
+    confirmationId: "confirm_budget",
+    principal: PRINCIPAL,
+    spendDay: shanghaiDate(now),
+    createdAt: now.toISOString(),
+  });
+  first.consumeTokenAndCreateOrder("paytok_a", order("ORDER_A", "paytok_a"), reservation);
+  assert.equal(first.getToken("paytok_a")?.used, true);
+  assert.throws(
+    () => second.consumeTokenAndCreateOrder("paytok_b", order("ORDER_B", "paytok_b"), reservation),
+    (error: unknown) => error instanceof DenyError && error.deny_reason === "over_budget" && error.detail.limit === "daily",
+  );
+  assert.equal(second.getToken("paytok_b")?.used, false);
+  assert.equal(second.findOrder("ORDER_B"), null);
+  assert.throws(
+    () =>
+      second.consumeTokenAndCreateOrder("paytok_b", { ...order("ORDER_C", "paytok_b"), amountCents: 50_400, amount: "504.00" }, {
+        ...reservation,
+        dailyCents: 200_000,
+        totalCents: 500_000,
+      }),
+    (error: unknown) => error instanceof DenyError && error.detail.limit === "per_order",
+  );
+  assert.equal(second.getToken("paytok_b")?.used, false);
+  first.close();
+  second.close();
+});
+
 test("revoking the user confirmation blocks new tokens", async () => {
   const app = await start();
   try {
@@ -388,10 +484,31 @@ test("page.pay uses the server catalog price and ignores the client amount", asy
     assert.equal(biz.total_amount, "8.00");
     assert.equal(biz.product_code, "FAST_INSTANT_TRADE_PAY");
     assert.equal(biz.out_trade_no, cashier.body.out_trade_no);
-    assert.match(cashier.body.alipay_bot.trigger_payment_signal, /alipay-bot trigger-payment-signal/);
-    assert.match(cashier.body.alipay_bot.submit_payment, /alipay-bot submit-payment/);
+    const intent = cashierIntentSummary("黑色签字笔x1", "8.00", "文具演示商户");
+    assert.equal(cashier.body.alipay_bot.submit_payment.includes(cashier.body.page_redirection_data), true);
+    assert.match(cashier.body.alipay_bot.submit_payment, /alipay-bot submit-payment --session-id <AIPAY_SESSION_ID>/);
+    assert.match(cashier.body.alipay_bot.submit_payment, /--intent-summary/);
+    assert.equal(cashier.body.alipay_bot.submit_payment.includes(intent), true);
+    assert.equal(JSON.stringify(cashier.body.alipay_bot).includes("trigger-payment-signal"), false);
+    assert.match(cashier.body.alipay_bot.query_payment_status, /alipay-bot query-payment-status --out-shake-no/);
     assert.equal((await api(app.base, `/payment-tokens/${token.token}`)).body.used, true);
     assert.equal((await api(app.base, "/expense-drafts")).body.expense_drafts.length, 0);
+  } finally {
+    await app.close();
+  }
+});
+
+test("PUBLIC_BASE_URL is the notify and return origin", async () => {
+  assert.equal(resolvePublicBaseUrl("https://pay.example.test/agent/"), "https://pay.example.test/agent");
+  assert.throws(() => resolvePublicBaseUrl("https://user:secret@pay.example.test"), /PUBLIC_BASE_URL/);
+  const app = await start(new ScriptedTradeQuery(), PRINCIPAL, "https://pay.example.test/agent");
+  try {
+    await boot(app.base);
+    const token = await issue(app.base);
+    const cashier = await purchase(app.base, token.token, [{ sku_id: "sku-pen-cent", quantity: 1 }]);
+    const page = new URL(cashier.body.page_redirection_data);
+    assert.equal(page.searchParams.get("notify_url"), "https://pay.example.test/agent/alipay/notify");
+    assert.equal(page.searchParams.get("return_url"), "https://pay.example.test/agent/");
   } finally {
     await app.close();
   }

@@ -41,10 +41,34 @@ function sendJson(
   res.end(payload);
 }
 
-function requestBaseUrl(req: IncomingMessage): string {
+/** Absolute origin, optional path, no credentials, query, or hash. Empty means derive from the request. */
+export function resolvePublicBaseUrl(raw: string | undefined): string | null {
+  const trimmed = raw?.trim() ?? "";
+  if (!trimmed) return null;
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    throw new Error("PUBLIC_BASE_URL must be an absolute http(s) URL");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("PUBLIC_BASE_URL must use http or https");
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error("PUBLIC_BASE_URL must not include credentials, a query, or a hash");
+  }
+  return `${url.origin}${url.pathname.replace(/\/$/, "")}`;
+}
+
+function requestBaseUrl(req: IncomingMessage, publicBaseUrl: string | null, trustProxy: boolean): string {
+  if (publicBaseUrl) return publicBaseUrl;
   const host = req.headers.host ?? "127.0.0.1";
-  const forwarded = req.headers["x-forwarded-proto"];
-  const proto = typeof forwarded === "string" && forwarded.length > 0 ? forwarded : "http";
+  let proto = "http";
+  if (trustProxy) {
+    const forwarded = req.headers["x-forwarded-proto"];
+    const first = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(",")[0]?.trim();
+    if (first === "http" || first === "https") proto = first;
+  }
   return `${proto}://${host}`;
 }
 
@@ -115,6 +139,10 @@ export function createApp(options: {
   userToken: string;
   /** When omitted, read DEMO_PRINCIPAL or use demo:office-user. */
   demoPrincipal?: string;
+  /** Fixed notify and return origin. When null, the request host is used. */
+  publicBaseUrl?: string | null;
+  /** Honor X-Forwarded-Proto only when this is true and publicBaseUrl is unset. */
+  trustProxy?: boolean;
 }): App {
   if (options.adminToken && options.userToken && options.adminToken === options.userToken) {
     throw new Error("USER_TOKEN must be different from ADMIN_TOKEN");
@@ -122,6 +150,8 @@ export function createApp(options: {
   const demoPrincipal = resolveDemoPrincipal(
     options.demoPrincipal === undefined ? process.env.DEMO_PRINCIPAL : options.demoPrincipal,
   );
+  const publicBaseUrl = options.publicBaseUrl ?? null;
+  const trustProxy = options.trustProxy === true;
   const productPay =
     options.productPay === undefined
       ? options.config
@@ -254,7 +284,10 @@ export function createApp(options: {
     }
 
     if (method === "POST" && pathname === "/agent/purchase") {
-      const bill = purchase.createCashier(parsePayCommand(parseJsonBody(await readRaw(req))), requestBaseUrl(req));
+      const bill = purchase.createCashier(
+        parsePayCommand(parseJsonBody(await readRaw(req))),
+        requestBaseUrl(req, publicBaseUrl, trustProxy),
+      );
       sendJson(res, 200, bill);
       return;
     }
@@ -263,14 +296,17 @@ export function createApp(options: {
     if (method === "POST" && confirmMatch) {
       await readRaw(req);
       requireAdmin(req);
-      const confirmed = await purchase.confirmTrade(decodeURIComponent(confirmMatch[1]), requestBaseUrl(req));
+      const confirmed = await purchase.confirmTrade(
+        decodeURIComponent(confirmMatch[1]),
+        requestBaseUrl(req, publicBaseUrl, trustProxy),
+      );
       sendJson(res, 200, confirmed);
       return;
     }
 
     if (method === "POST" && pathname === "/alipay/notify") {
       const fields = parseForm(await readRaw(req));
-      const result = await purchase.applyNotify(fields, requestBaseUrl(req));
+      const result = await purchase.applyNotify(fields, requestBaseUrl(req, publicBaseUrl, trustProxy));
       const payload = Buffer.from(result);
       res.writeHead(200, {
         "content-type": "text/plain; charset=utf-8",
