@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>报关合规审查 · Skill Pay</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="top">
+    <div>
+      <p class="eyebrow">PAYATHON 2026 · Skill Pay</p>
+      <h1>报关合规审查</h1>
+      <p class="lede">Agent 调用一次 Skill，先给出被权益挡住的审查结果，用户确认后付款，页面留下回执。</p>
+    </div>
+    <div class="seal" id="mode-seal">
+      <span class="seal-kicker">环境</span>
+      <strong id="mode-label">检查中</strong>
+      <span id="mode-note"></span>
+    </div>
+  </header>
+
+  <ol class="steps" id="steps">
+    <li data-step="call">1 调用 Skill</li>
+    <li data-step="deliver">2 按档交付</li>
+    <li data-step="paid">3 支付回执</li>
+  </ol>
+
+  <main>
+    <section class="sheet" aria-labelledby="form-title">
+      <div class="sheet-head">
+        <h2 id="form-title">申报单</h2>
+        <div class="row-actions">
+          <button type="button" id="fill-risky">填入风险样例</button>
+          <button type="button" id="fill-clean">填入干净样例</button>
+        </div>
+      </div>
+      <label class="buyer">买家标识
+        <input id="buyerId" value="judge-demo" maxlength="64" autocomplete="off" />
+      </label>
+      <div class="grid">
+        <label>提运单参考<input id="shipmentRef" /></label>
+        <label>进出口方向
+          <select id="direction">
+            <option value="">请选择</option>
+            <option value="export">出口</option>
+            <option value="import">进口</option>
+          </select>
+        </label>
+        <label>发货人<input id="consignor" /></label>
+        <label>收货人<input id="consignee" /></label>
+        <label>监管方式<input id="tradeMode" /></label>
+        <label>运输方式<input id="transportMode" /></label>
+        <label>原产国<input id="originCountry" /></label>
+        <label>运抵国<input id="destinationCountry" /></label>
+        <label class="wide">商品名称<input id="goodsName" /></label>
+        <label class="wide">规格型号<input id="spec" /></label>
+        <label>HS 编码<input id="hsCode" /></label>
+        <label>税收分类编码<input id="taxCode" /></label>
+        <label>数量<input id="quantity" /></label>
+        <label>单位<input id="unit" /></label>
+        <label>总价<input id="totalAmount" /></label>
+        <label>币制<input id="currency" /></label>
+        <label>毛重千克<input id="grossWeightKg" /></label>
+        <label>净重千克<input id="netWeightKg" /></label>
+        <label>件数<input id="packages" /></label>
+        <label>包装<input id="packageType" /></label>
+        <label>合同协议号<input id="contractNo" /></label>
+        <label>发票号<input id="invoiceNo" /></label>
+        <label>许可证号<input id="licenseNo" /></label>
+        <label class="wide">备注<input id="remark" /></label>
+      </div>
+      <button type="button" class="call" id="call-skill">由 Agent 调用 Skill</button>
+    </section>
+
+    <section class="result" aria-live="polite" aria-labelledby="result-title">
+      <h2 id="result-title">审查交付</h2>
+      <p class="empty" id="result-empty">还没有调用。风险样例会同时打中禁止类关键词、HS 错位和缺失栏位。</p>
+      <div id="result-body" hidden></div>
+      <h3>Agent 轨迹</h3>
+      <ol class="trace" id="trace"></ol>
+    </section>
+  </main>
+
+  <section class="pay" aria-labelledby="pay-title">
+    <div class="pay-head">
+      <h2 id="pay-title">授权并付款</h2>
+      <button type="button" id="new-buyer">换一个买家</button>
+    </div>
+    <p id="entitlement-line">当前没有权益。调用 Skill 后选择买断或周期。</p>
+    <div class="tiers" id="tiers"></div>
+    <label class="auth">
+      <input type="checkbox" id="auth" />
+      <span>我确认授权支付所选档位。沙箱模拟只生成演示回执，不产生真实资金。</span>
+    </label>
+    <div class="pay-actions">
+      <button type="button" class="pay-button" id="pay-button" disabled>确认沙箱支付</button>
+      <a id="cashier-link" hidden rel="noopener" target="_blank">打开支付宝收银台</a>
+      <button type="button" id="query-button" hidden>查询支付结果</button>
+      <button type="button" id="plaintext-button" hidden>下载明文存档</button>
+    </div>
+    <p class="status" id="status"></p>
+    <article class="receipt" id="receipt" hidden>
+      <header>
+        <h3>支付回执</h3>
+        <p class="stamp" id="receipt-stamp"></p>
+      </header>
+      <dl id="receipt-fields"></dl>
+    </article>
+    <pre id="plaintext-view" hidden></pre>
+    <p class="missing" id="missing"></p>
+  </section>
+  <script src="/app.js"></script>
+</body>
+</html>
